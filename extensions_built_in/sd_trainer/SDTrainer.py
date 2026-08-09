@@ -513,7 +513,9 @@ class SDTrainer(BaseSDTrainProcess):
 
         if self.train_config.match_noise_norm:
             # match the norm of the noise
-            norm_dims = tuple(range(1, noise.ndim))
+            # Preserve the existing visual/video behavior while supporting
+            # packed audio latents shaped [batch, sequence, channels].
+            norm_dims = (1, 2) if noise.ndim == 3 else (1, 2, 3)
             noise_norm = torch.linalg.vector_norm(noise, ord=2, dim=norm_dims, keepdim=True)
             noise_pred_norm = torch.linalg.vector_norm(noise_pred, ord=2, dim=norm_dims, keepdim=True)
             noise_pred = noise_pred * (noise_norm / noise_pred_norm)

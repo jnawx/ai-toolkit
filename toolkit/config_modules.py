@@ -1505,6 +1505,8 @@ def validate_configs(
                 raise ValueError("controls cannot be used with an audio-only dataset")
             if dataset.alpha_mask or dataset.mask_path:
                 raise ValueError("image masks cannot be used with an audio-only dataset")
+            if train_config.blended_blur_noise:
+                raise ValueError("blended_blur_noise cannot be used with an audio-only dataset")
 
     if model_config.is_flux:
         if save_config.save_format != 'diffusers':

@@ -9,34 +9,48 @@ import torch
 
 def _stub_optional_imports():
     """Load config parsing without requiring a full training environment."""
+    added_modules = []
+
+    def add_stub(name, module):
+        if name not in sys.modules:
+            sys.modules[name] = module
+            added_modules.append(name)
+
     hf = types.ModuleType("huggingface_hub")
     hf_utils = types.ModuleType("huggingface_hub.utils")
     hf_tqdm = types.ModuleType("huggingface_hub.utils.tqdm")
     hf_tqdm.is_tqdm_disabled = lambda _level: None
-    sys.modules.setdefault("huggingface_hub", hf)
-    sys.modules.setdefault("huggingface_hub.utils", hf_utils)
-    sys.modules.setdefault("huggingface_hub.utils.tqdm", hf_tqdm)
+    add_stub("huggingface_hub", hf)
+    add_stub("huggingface_hub.utils", hf_utils)
+    add_stub("huggingface_hub.utils.tqdm", hf_tqdm)
 
     prompt_utils = types.ModuleType("toolkit.prompt_utils")
     prompt_utils.PromptEmbeds = object
-    sys.modules.setdefault("toolkit.prompt_utils", prompt_utils)
+    add_stub("toolkit.prompt_utils", prompt_utils)
 
     album_artwork = types.ModuleType("toolkit.audio.album_artwork")
     album_artwork.add_album_artwork = lambda *_args, **_kwargs: None
-    sys.modules.setdefault("toolkit.audio.album_artwork", album_artwork)
+    add_stub("toolkit.audio.album_artwork", album_artwork)
 
     torchao = types.ModuleType("torchao")
     torchao_quantization = types.ModuleType("torchao.quantization")
     quant_primitives = types.ModuleType("torchao.quantization.quant_primitives")
     quant_primitives._DTYPE_TO_BIT_WIDTH = {}
-    sys.modules.setdefault("torchao", torchao)
-    sys.modules.setdefault("torchao.quantization", torchao_quantization)
-    sys.modules.setdefault("torchao.quantization.quant_primitives", quant_primitives)
+    add_stub("torchao", torchao)
+    add_stub("torchao.quantization", torchao_quantization)
+    add_stub("torchao.quantization.quant_primitives", quant_primitives)
+    return added_modules
 
 
-_stub_optional_imports()
-
-from toolkit.config_modules import DatasetConfig, preprocess_dataset_raw_config
+_config_was_loaded = "toolkit.config_modules" in sys.modules
+_stubbed_modules = _stub_optional_imports()
+try:
+    from toolkit.config_modules import DatasetConfig, preprocess_dataset_raw_config
+finally:
+    if not _config_was_loaded:
+        sys.modules.pop("toolkit.config_modules", None)
+    for _module_name in reversed(_stubbed_modules):
+        sys.modules.pop(_module_name, None)
 
 
 class AudioWaveformPreparationTests(unittest.TestCase):

@@ -134,7 +134,13 @@ def apply_noise_offset(noise, noise_offset):
         return noise
     if len(noise.shape) > 4:
         raise ValueError("Applying noise offset not supported for video models at this time.")
-    noise = noise + noise_offset * torch.randn((noise.shape[0], noise.shape[1], 1, 1), device=noise.device)
+    if noise.ndim == 3:
+        # Packed audio is [batch, sequence, channels]. Match image offset
+        # semantics by drawing once per latent channel, not per sequence row.
+        offset_shape = (noise.shape[0], 1, noise.shape[2])
+    else:
+        offset_shape = (noise.shape[0], noise.shape[1], 1, 1)
+    noise = noise + noise_offset * torch.randn(offset_shape, device=noise.device)
     return noise
 
 

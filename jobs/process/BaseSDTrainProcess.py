@@ -1341,17 +1341,25 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                 noise_multiplier = self.train_config.noise_multiplier
                 
-                s = (noise.shape[0], noise.shape[1], 1, 1)
-                if len(noise.shape) == 5:
+                if is_audio_only:
+                    s = (noise.shape[0], 1, noise.shape[2])
+                elif len(noise.shape) == 5:
                     # if we have a 5d tensor, then we need to do it on a per batch item, per channel basis, per frame
                     s = (noise.shape[0], noise.shape[1], noise.shape[2], 1, 1)
+                else:
+                    s = (noise.shape[0], noise.shape[1], 1, 1)
                 
                 noise = noise * noise_multiplier
                 
                 if self.train_config.do_signal_correction_noise:
                     batch_noise = latents.clone().to(noise.device, dtype=noise.dtype)
+                    correction_shape = (
+                        (batch_noise.shape[0], 1, batch_noise.shape[2])
+                        if is_audio_only
+                        else (batch_noise.shape[0], batch_noise.shape[1], 1, 1)
+                    )
                     scn_scale = torch.randn(
-                        batch_noise.shape[0], batch_noise.shape[1], 1, 1,
+                        correction_shape,
                         device=batch_noise.device, 
                         dtype=batch_noise.dtype
                     ) * self.train_config.signal_correction_noise_scale
@@ -1365,8 +1373,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     else:
                         # shuffle tensors ensuring that no tensor is in the same position as before
                         batch_noise = latents.clone().roll(shifts=torch.randint(1, latents.shape[0], (1,)).item(), dims=0).to(noise.device, dtype=noise.dtype)
+                        correction_shape = (
+                            (batch_noise.shape[0], 1, batch_noise.shape[2])
+                            if is_audio_only
+                            else (batch_noise.shape[0], batch_noise.shape[1], 1, 1)
+                        )
                         batch_noise_scale = torch.randn(
-                            batch_noise.shape[0], batch_noise.shape[1], 1, 1,
+                            correction_shape,
                             device=batch_noise.device,
                             dtype=batch_noise.dtype
                         ) * self.train_config.batch_noise_correction_scale

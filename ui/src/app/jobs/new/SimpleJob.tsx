@@ -10,7 +10,7 @@ import {
   SampleTags,
 } from './options';
 import { defaultCompileOptions, defaultDatasetConfig } from './jobConfig';
-import { GroupedSelectOption, JobConfig, SelectOption } from '@/types';
+import { DatasetConfig, GroupedSelectOption, JobConfig, SelectOption } from '@/types';
 import { objectCopy, tagsToObj, objToTags } from '@/utils/basic';
 import {
   TextInput,
@@ -48,6 +48,9 @@ type Props = {
 };
 
 const isDev = process.env.NODE_ENV === 'development';
+
+const isAudioOnlyDataset = (dataset: DatasetConfig) =>
+  Boolean(dataset.do_audio) && dataset.resolution.length === 0;
 
 export default function SimpleJob({
   jobConfig,
@@ -1115,6 +1118,11 @@ export default function SimpleJob({
             <>
               {jobConfig.config.process[0].datasets.map((dataset, i) => (
                 <div key={i} className="p-4 rounded-lg bg-gray-800 relative">
+                  {isAudioOnlyDataset(dataset) && (
+                    <div className="mb-3 text-sm font-medium text-amber-300">
+                      Audio only — video streams in media containers will be ignored
+                    </div>
+                  )}
                   <div className="absolute top-2 right-2 flex gap-1">
                     <button
                       type="button"
@@ -1251,7 +1259,7 @@ export default function SimpleJob({
                         ]}
                       />
 
-                      {modelArch?.additionalSections?.includes('datasets.num_frames') && !dataset.auto_frame_count && (
+                      {modelArch?.additionalSections?.includes('datasets.num_frames') && !dataset.auto_frame_count && !isAudioOnlyDataset(dataset) && (
                         <NumberInput
                           label="Num Frames"
                           className="pt-2"
@@ -1278,7 +1286,7 @@ export default function SimpleJob({
                           checked={dataset.is_reg || false}
                           onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].is_reg`)}
                         />
-                        {modelArch?.additionalSections?.includes('datasets.auto_frame_count') && (
+                        {modelArch?.additionalSections?.includes('datasets.auto_frame_count') && !isAudioOnlyDataset(dataset) && (
                           <Checkbox
                             label="Auto Frame Count"
                             checked={dataset.auto_frame_count || false}
@@ -1286,7 +1294,7 @@ export default function SimpleJob({
                             docKey="datasets.auto_frame_count"
                           />
                         )}
-                        {modelArch?.additionalSections?.includes('datasets.do_i2v') && (
+                        {modelArch?.additionalSections?.includes('datasets.do_i2v') && !isAudioOnlyDataset(dataset) && (
                           <Checkbox
                             label="Do I2V"
                             checked={dataset.do_i2v || false}
@@ -1308,6 +1316,20 @@ export default function SimpleJob({
                             docKey="datasets.do_audio"
                           />
                         )}
+                        {modelArch?.additionalSections?.includes('datasets.audio_duration_seconds') && isAudioOnlyDataset(dataset) && (
+                          <NumberInput
+                            label="Audio Duration (seconds)"
+                            className="pt-2"
+                            value={dataset.audio_duration_seconds ?? 5.0}
+                            onChange={value =>
+                              setJobConfig(value, `config.process[0].datasets[${i}].audio_duration_seconds`)
+                            }
+                            placeholder="eg. 5.0"
+                            min={0.1}
+                            required
+                            docKey="datasets.audio_duration_seconds"
+                          />
+                        )}
                         {modelArch?.additionalSections?.includes('datasets.audio_normalize') && (
                           <Checkbox
                             label="Audio Normalize"
@@ -1322,7 +1344,7 @@ export default function SimpleJob({
                             docKey="datasets.audio_normalize"
                           />
                         )}
-                        {modelArch?.additionalSections?.includes('datasets.audio_preserve_pitch') && (
+                        {modelArch?.additionalSections?.includes('datasets.audio_preserve_pitch') && !isAudioOnlyDataset(dataset) && (
                           <Checkbox
                             label="Audio Preserve Pitch"
                             checked={dataset.audio_preserve_pitch || false}
@@ -1337,7 +1359,7 @@ export default function SimpleJob({
                           />
                         )}
                       </FormGroup>
-                      {!isAudioModel && (
+                      {!isAudioModel && !isAudioOnlyDataset(dataset) && (
                         <FormGroup label="Flipping" docKey={'datasets.flip'} className="mt-2">
                           <Checkbox
                             label={
@@ -1385,6 +1407,11 @@ export default function SimpleJob({
                               </div>
                             ))}
                           </div>
+                          {isAudioOnlyDataset(dataset) && (
+                            <div className="mt-2 text-xs text-gray-400">
+                              No resolution selected while Do Audio is enabled: this dataset will train audio only.
+                            </div>
+                          )}
                         </FormGroup>
                       </div>
                     )}

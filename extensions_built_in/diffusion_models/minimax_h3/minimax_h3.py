@@ -1,9 +1,10 @@
 """MiniMax-H3 (33B joint video+audio DiT) for ai-toolkit.
 
 Supports t2v (t2va) and first-frame i2v (fl2va) training and sampling, with
-joint audio when the dataset provides it. Image datasets train as single
-latent frames (keyframe-row geometry) and sampling with num_frames 1 renders
-a single image. The architecture lives in ./src/:
+joint audio when the dataset provides it. Audio-only datasets train packed
+audio rows without video latents. Image datasets train as single latent frames
+(keyframe-row geometry) and sampling with num_frames 1 renders a single image.
+The architecture lives in ./src/:
 
   - transformer.py: packed-sequence DiT, weight-compatible with the original
     ``MiniMaxAI/MiniMax-H3`` checkpoint keys
@@ -818,6 +819,107 @@ class MinimaxH3Model(BaseModel):
     # ------------------------------------------------------------------
     # Training forward
     # ------------------------------------------------------------------
+    def add_noise(
+        self,
+        original_samples: torch.Tensor,
+        noise: torch.Tensor,
+        timesteps: torch.Tensor,
+        batch: "DataLoaderBatchDTO" = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        if batch is not None and batch.dataset_config.is_audio_only:
+            return packing.add_audio_noise(original_samples, noise, timesteps)
+        return super().add_noise(
+            original_samples, noise, timesteps, batch=batch, **kwargs
+        )
+
+    def _get_audio_only_noise_prediction(
+        self,
+        latent_model_input: torch.Tensor,
+        timestep: torch.Tensor,
+        text_embeddings: AdvancedPromptEmbeds,
+    ) -> torch.Tensor:
+        """Predict packed audio rows without constructing video latents."""
+        device = self.device_torch
+        dtype = self.torch_dtype
+        batch_size, num_audio_rows, _ = latent_model_input.shape
+        if num_audio_rows % packing.AUDIO_CHANNELS != 0:
+            raise ValueError(
+                "MiniMax-H3 packed audio rows must be divisible by the channel count"
+            )
+        num_audio_latents = num_audio_rows // packing.AUDIO_CHANNELS
+
+        with torch.no_grad():
+            sigma_v = (timestep.to(device, torch.float32) / 1000.0).clamp(
+                1e-6, 1.0
+            )
+            if sigma_v.dim() == 0:
+                sigma_v = sigma_v.unsqueeze(0)
+            if sigma_v.shape[0] != batch_size:
+                sigma_v = sigma_v.expand(batch_size)
+            sigma_a = remap_sigma(sigma_v)
+            t_v = 1.0 - sigma_v
+            t_a = 1.0 - sigma_a
+
+            # H3's released rotary layout positions audio channels against the
+            # edges of a 768px square video canvas. A video is not created; the
+            # corresponding latent geometry is used only for those coordinates.
+            canonical_latent_size = 48
+            layouts = [
+                build_packed_sequence(
+                    text_token_tags=text_embeddings.text_token_tags[i].to("cpu"),
+                    num_latent_frames=0,
+                    latent_height=canonical_latent_size,
+                    latent_width=canonical_latent_size,
+                    num_audio_latents=num_audio_latents,
+                )
+                for i in range(batch_size)
+            ]
+            (
+                position_ids,
+                token_tags,
+                video_indices,
+                audio_indices,
+                text_indices,
+                _,
+            ) = pad_layouts_to_batch(layouts)
+
+            row_t = t_v.view(-1, 1).expand(-1, token_tags.shape[1]).clone()
+            row_t[:, audio_indices] = t_a.view(-1, 1)
+
+            max_text = int(text_indices.shape[0])
+            text_batch = torch.zeros(
+                batch_size,
+                max_text,
+                text_embeddings.text_embeds[0].shape[-1],
+                device=device,
+                dtype=dtype,
+            )
+            for i, embeds in enumerate(text_embeddings.text_embeds):
+                text_batch[i, : embeds.shape[0]] = embeds.to(device, dtype)
+
+            video_rows = torch.empty(
+                batch_size,
+                0,
+                self.model.video_patch_proj.in_features,
+                device=device,
+                dtype=dtype,
+            )
+
+        _, audio_pred = self.model(
+            hidden_states=video_rows,
+            audio_hidden_states=latent_model_input.to(device, dtype),
+            encoder_hidden_states=text_batch,
+            row_timesteps=row_t.to(device),
+            token_tags=token_tags.to(device),
+            position_ids=position_ids.to(device),
+            video_indices=video_indices.to(device),
+            audio_indices=audio_indices.to(device),
+            text_indices=text_indices.to(device),
+        )
+        # The H3 head predicts clean - noise; ai-toolkit trains noise - clean.
+        return -audio_pred
+
     def get_noise_prediction(
         self,
         latent_model_input: torch.Tensor,  # (B, 24, t, h, w) noisy latents
@@ -830,6 +932,11 @@ class MinimaxH3Model(BaseModel):
         dtype = self.torch_dtype
         if self.model.device == torch.device("cpu"):
             self.model.to(device)
+
+        if batch is not None and batch.dataset_config.is_audio_only:
+            return self._get_audio_only_noise_prediction(
+                latent_model_input, timestep, text_embeddings
+            )
 
         # a grad-enabled prediction is the primary (loss carrying) one unless
         # the trainer declared a secondary slot on the batch (prior /

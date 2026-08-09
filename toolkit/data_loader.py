@@ -393,7 +393,11 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         self.dataset_config = dataset_config
         # update bucket divisibility
         self.dataset_config.bucket_tolerance = sd.get_bucket_divisibility()
-        self.is_video = dataset_config.num_frames > 1 or dataset_config.auto_frame_count
+        self.is_audio_only = dataset_config.is_audio_only
+        self.is_video = (
+            not self.is_audio_only
+            and (dataset_config.num_frames > 1 or dataset_config.auto_frame_count)
+        )
         self.is_audio_model = hasattr(sd, 'is_audio_model') and sd.is_audio_model if sd is not None else False
         super().__init__()
         folder_path = dataset_config.folder_path
@@ -427,7 +431,11 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         # check if dataset_path is a folder or json
         if os.path.isdir(self.dataset_path):
             extensions = image_extensions
-            if self.is_audio_model:
+            if self.is_audio_only:
+                # Audio-only datasets may contain direct audio files or media
+                # containers. Their video streams are never decoded.
+                extensions = audio_extensions + video_extensions
+            elif self.is_audio_model:
                 # only look for audio files
                 extensions = audio_extensions
             elif self.is_video:
@@ -539,12 +547,20 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                     te_padding_side=self.sd.te_padding_side if self.sd else "right",
                     latent_space_version=latent_space_version,
                     temporal_compression=temporal_compression,
-                    sample_rate=self.sd.sample_rate if self.is_audio_model and self.sd is not None else 48000,
+                    sample_rate=(
+                        self.sd.audio_sample_rate
+                        if self.is_audio_only and self.sd is not None
+                        else self.sd.sample_rate
+                        if self.is_audio_model and self.sd is not None
+                        else 48000
+                    ),
                 )
                 self.file_list.append(file_item)
             except Exception as e:
                 print_acc(traceback.format_exc())
-                if self.is_video:
+                if self.is_audio_only:
+                    print_acc(f"Error processing audio: {file}")
+                elif self.is_video:
                     print_acc(f"Error processing video: {file}")
                 else:
                     print_acc(f"Error processing image: {file}")
@@ -555,7 +571,10 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         with open(dataset_size_file, 'w') as f:
             json.dump(self.size_database, f)
         
-        if self.is_video:
+        if self.is_audio_only:
+            print_acc(f"  -  Found {len(self.file_list)} audio sources")
+            assert len(self.file_list) > 0, f"no audio sources found in {self.dataset_path}"
+        elif self.is_video:
             num_videos = len([x for x in self.file_list if x.is_video])
             num_images = len(self.file_list) - num_videos
             if num_images > 0:
@@ -568,7 +587,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             assert len(self.file_list) > 0, f"no images found in {self.dataset_path}"
 
         # handle x axis flips
-        if self.dataset_config.flip_x:
+        if not self.is_audio_only and self.dataset_config.flip_x:
             print_acc("  -  adding x axis flips")
             current_file_list = [x for x in self.file_list]
             for file_item in current_file_list:
@@ -578,7 +597,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                 self.file_list.append(new_file_item)
 
         # handle y axis flips
-        if self.dataset_config.flip_y:
+        if not self.is_audio_only and self.dataset_config.flip_y:
             print_acc("  -  adding y axis flips")
             current_file_list = [x for x in self.file_list]
             for file_item in current_file_list:

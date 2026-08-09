@@ -111,9 +111,18 @@ const docs: { [key: string]: ConfigDoc } = {
     title: 'Do Audio',
     description: (
       <>
-        For models that support audio with video, this option will load the audio from the video and resize it to match
-        the video sequence. Since the video is automatically resized, the audio may drop or raise in pitch to match the
-        new speed of the video. It is important to prep your dataset to have the proper length before training.
+        For models that support audio with video, this option loads audio alongside the visual sequence. If no dataset
+        resolution is selected, MiniMax-H3 instead treats the dataset as audio only: direct audio files and the audio
+        streams of video containers are loaded without decoding video frames.
+      </>
+    ),
+  },
+  'datasets.audio_duration_seconds': {
+    title: 'Audio Duration',
+    description: (
+      <>
+        Fixed duration used by an audio-only dataset. Longer files are center-cropped and shorter files are padded with
+        silence so batches and latent caches have a consistent shape.
       </>
     ),
   },

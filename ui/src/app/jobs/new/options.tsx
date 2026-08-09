@@ -22,6 +22,7 @@ type AdditionalSections =
   | 'datasets.multi_control_paths'
   | 'datasets.do_i2v'
   | 'datasets.do_audio'
+  | 'datasets.audio_duration_seconds'
   | 'datasets.audio_normalize'
   | 'datasets.audio_preserve_pitch'
   | 'datasets.auto_frame_count'
@@ -740,7 +741,7 @@ export const modelArchs: ModelArch[] = [
       ],
     },
     disableSections: ['network.conv'],
-    additionalSections: ['sample.ctrl_img', 'datasets.num_frames', 'model.layer_offloading', 'model.low_vram', 'datasets.do_audio', 'datasets.audio_normalize', 'datasets.audio_preserve_pitch', 'datasets.do_i2v', 'train.audio_loss_multiplier', 'datasets.auto_frame_count', 'model.assistant_lora_path'],
+    additionalSections: ['sample.ctrl_img', 'datasets.num_frames', 'model.layer_offloading', 'model.low_vram', 'datasets.do_audio', 'datasets.audio_duration_seconds', 'datasets.audio_normalize', 'datasets.audio_preserve_pitch', 'datasets.do_i2v', 'train.audio_loss_multiplier', 'datasets.auto_frame_count', 'model.assistant_lora_path'],
     modelNotes: (
       <div className="space-y-2">
         <p>
@@ -772,6 +773,10 @@ export const modelArchs: ModelArch[] = [
           keep guidance scale at 1. Video is fixed 24 fps and frame counts snap down to the 17n+5 grid (5, 22, 39, 56,
           ..., 107, 124 ≈ 5s). Image datasets (num_frames 1) train as single frames, and a sample with num_frames 1
           renders a single image.
+        </p>
+        <p>
+          To train audio only, enable <strong>Do Audio</strong> and clear every dataset resolution. Audio files and audio
+          streams from video containers are supported; video frames are not decoded for that dataset.
         </p>
       </div>
     ),

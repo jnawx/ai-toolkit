@@ -428,6 +428,26 @@ def remap_sigma(
     return shift_sigma(base, to_shift)
 
 
+def audio_sigma_from_timesteps(timesteps: torch.Tensor) -> torch.Tensor:
+    """Map ai-toolkit's 0..1000 video timestep scale to H3 audio sigma."""
+    video_sigma = (timesteps.to(torch.float32) / 1000.0).clamp(1e-6, 1.0)
+    return remap_sigma(video_sigma)
+
+
+def add_audio_noise(
+    original_samples: torch.Tensor,
+    noise: torch.Tensor,
+    timesteps: torch.Tensor,
+) -> torch.Tensor:
+    """Noise packed H3 audio rows with the released audio sigma schedule."""
+    sigma = audio_sigma_from_timesteps(timesteps).to(
+        original_samples.device, original_samples.dtype
+    )
+    while sigma.ndim < original_samples.ndim:
+        sigma = sigma.unsqueeze(-1)
+    return (1.0 - sigma) * original_samples + sigma * noise
+
+
 def build_sigma_schedule(
     num_inference_steps: int, shift: float = VIDEO_SIGMA_SHIFT
 ) -> torch.Tensor:

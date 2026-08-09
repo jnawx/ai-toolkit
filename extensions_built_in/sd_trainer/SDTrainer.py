@@ -513,8 +513,9 @@ class SDTrainer(BaseSDTrainProcess):
 
         if self.train_config.match_noise_norm:
             # match the norm of the noise
-            noise_norm = torch.linalg.vector_norm(noise, ord=2, dim=(1, 2, 3), keepdim=True)
-            noise_pred_norm = torch.linalg.vector_norm(noise_pred, ord=2, dim=(1, 2, 3), keepdim=True)
+            norm_dims = tuple(range(1, noise.ndim))
+            noise_norm = torch.linalg.vector_norm(noise, ord=2, dim=norm_dims, keepdim=True)
+            noise_pred_norm = torch.linalg.vector_norm(noise_pred, ord=2, dim=norm_dims, keepdim=True)
             noise_pred = noise_pred * (noise_norm / noise_pred_norm)
 
         if self.train_config.pred_scaler != 1.0:
@@ -904,10 +905,9 @@ class SDTrainer(BaseSDTrainProcess):
                     v2=self.train_config.linear_timesteps2,
                     timestep_type=self.train_config.timestep_type
                 ).to(loss.device, dtype=loss.dtype)
-                if len(loss.shape) == 4:
-                    timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
-                elif len(loss.shape) == 5:
-                    timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
+                timestep_weight = timestep_weight.view(
+                    (-1,) + (1,) * (loss.ndim - 1)
+                ).detach()
                 loss = loss * timestep_weight
 
         if self.train_config.do_prior_divergence and prior_pred is not None:
@@ -944,18 +944,11 @@ class SDTrainer(BaseSDTrainProcess):
                 print_acc("Prior loss is nan")
                 prior_loss = None
             else:
-                if len(noise_pred.shape) == 5:
-                    # video B,C,T,H,W
-                    prior_loss = prior_loss.mean([1, 2, 3, 4])
-                else:
-                    prior_loss = prior_loss.mean([1, 2, 3])
+                prior_loss = prior_loss.mean(tuple(range(1, prior_loss.ndim)))
                 # loss = loss + prior_loss
                 # loss = loss + prior_loss
             # loss = loss + prior_loss
-        if len(noise_pred.shape) == 5:
-            loss = loss.mean([1, 2, 3, 4])
-        else:
-            loss = loss.mean([1, 2, 3])
+        loss = loss.mean(tuple(range(1, loss.ndim)))
         # apply loss multiplier before prior loss
         # multiply by our mask
         try:
@@ -979,6 +972,9 @@ class SDTrainer(BaseSDTrainProcess):
                 loss = apply_snr_weight(loss, timesteps, self.sd.noise_scheduler, self.train_config.min_snr_gamma)
 
         loss = loss.mean()
+
+        if batch.dataset_config.is_audio_only:
+            loss = loss * self.train_config.audio_loss_multiplier
         
         # check for audio loss
         if batch.audio_pred is not None and batch.audio_target is not None:
@@ -1447,7 +1443,21 @@ class SDTrainer(BaseSDTrainProcess):
                     if batch.clip_image_tensor is not None:
                         clip_images = batch.clip_image_tensor.to(self.device_torch, dtype=dtype).detach()
 
-            mask_multiplier = torch.ones((noisy_latents.shape[0], 1, 1, 1), device=self.device_torch, dtype=dtype)
+            if batch.dataset_config.is_audio_only:
+                # Audio latents are [batch, sequence, channels]. Keep the
+                # default mask rank compatible so broadcasting cannot add an
+                # accidental batch dimension to the loss.
+                mask_multiplier = torch.ones(
+                    (noisy_latents.shape[0], 1, 1),
+                    device=self.device_torch,
+                    dtype=dtype,
+                )
+            else:
+                mask_multiplier = torch.ones(
+                    (noisy_latents.shape[0], 1, 1, 1),
+                    device=self.device_torch,
+                    dtype=dtype,
+                )
             if batch.mask_tensor is not None and self.sd.do_masked_loss:
                 with self.timer('get_mask_multiplier'):
                     # upsampling no supported for bfloat16

@@ -19,6 +19,7 @@ from tqdm import tqdm
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection, SiglipImageProcessor
 
 from toolkit.audio.preserve_pitch import time_stretch_preserve_pitch
+from toolkit.audio.processing import prepare_audio_for_training, waveform_to_stereo
 from toolkit.basic import flush, value_map
 from toolkit.buckets import get_bucket_for_image_size, get_resolution
 from toolkit.config_modules import ControlTypes
@@ -107,23 +108,6 @@ def clean_caption(caption):
     # # join back together
     # caption = ', '.join(caption_split)
     return caption
-
-def waveform_to_stereo(waveform):
-    c = waveform.shape[0]
-    if c == 2:
-        return waveform
-    if c == 1:
-        return waveform.expand(2, -1)
-    if c == 6:  # 5.1: FL, FR, FC, LFE, BL, BR
-        fl, fr, fc, _, bl, br = waveform
-        k = 0.7071
-        return torch.stack([fl + k * fc + k * bl, fr + k * fc + k * br])
-    if c == 8:  # 7.1: FL, FR, FC, LFE, BL, BR, SL, SR
-        fl, fr, fc, _, bl, br, sl, sr = waveform
-        k = 0.7071
-        return torch.stack([fl + k * fc + k * (bl + sl), fr + k * fc + k * (br + sr)])
-    return waveform.mean(0, keepdim=True).expand(2, -1)
-
 
 class CaptionMixin:
     def get_caption_item(self: 'AiToolkitDataset', index):
@@ -232,7 +216,7 @@ class BucketsMixin:
         # for file_item in enumerate(file_list):
         for idx, file_item in enumerate(file_list):
             file_item: 'FileItemDTO' = file_item
-            if self.is_audio_model:
+            if self.is_audio_model or self.dataset_config.is_audio_only:
                 bucket_key = f"{file_item.width}ms"
                 if bucket_key not in self.buckets:
                     self.buckets[bucket_key] = Bucket(file_item.width, 1)
@@ -457,9 +441,20 @@ class AudioProcessingDTOMixin:
             import torchaudio
 
             waveform, sample_rate = torchaudio.load(self.path)  # [channels, samples]
-            waveform = waveform_to_stereo(waveform)  # Convert to stereo if not already
-            if sample_rate != self.sample_rate:
-                waveform = torchaudio.functional.resample(waveform, sample_rate, self.sample_rate)
+            if self.is_audio_only:
+                waveform = prepare_audio_for_training(
+                    waveform,
+                    sample_rate=sample_rate,
+                    target_sample_rate=self.sample_rate,
+                    duration_seconds=self.dataset_config.audio_duration_seconds,
+                    normalize=self.dataset_config.audio_normalize,
+                )
+            else:
+                waveform = waveform_to_stereo(waveform)
+                if sample_rate != self.sample_rate:
+                    waveform = torchaudio.functional.resample(
+                        waveform, sample_rate, self.sample_rate
+                    )
             self.tensor = waveform
             self.audio_tensor = waveform
             self.audio_data = {"waveform": waveform, "sample_rate": int(self.sample_rate)}
@@ -874,7 +869,7 @@ class ImageProcessingDTOMixin:
                 if self.has_unconditional:
                     self.load_unconditional_image()
                 return
-        if self.is_audio_model:
+        if self.is_audio_model or self.is_audio_only:
             self.load_and_process_audio()
             return
         if self.is_video:
@@ -1792,6 +1787,11 @@ class LatentCachingFileItemDTOMixin:
         if self.is_audio_model:
             item["is_audio_model"] = True
             item["sample_rate"] = self.sample_rate
+        if self.is_audio_only:
+            item["is_audio_only"] = True
+            item["sample_rate"] = self.sample_rate
+            item["audio_duration_seconds"] = self.dataset_config.audio_duration_seconds
+            item["audio_normalize"] = self.dataset_config.audio_normalize
         if self.dataset_config.cache_tensors_to_disk:
             # tensor is stored in the cache file, invalidate caches made without it
             item["cache_tensors_to_disk"] = True
@@ -1867,7 +1867,7 @@ class LatentCachingFileItemDTOMixin:
             waveform = _waveform_from_int16(self._cached_waveform_int16)
             self.audio_tensor = waveform
             self.audio_data = {"waveform": waveform, "sample_rate": self._cached_waveform_sample_rate}
-            if self.is_audio_model:
+            if self.is_audio_model or self.is_audio_only:
                 # audio-only models use the waveform as the main tensor
                 self.tensor = waveform
         return self._encoded_latent
@@ -1991,7 +1991,7 @@ class LatentCachingMixin:
             # add batch dimension
             cache_uint8 = getattr(self.sd, 'cache_latents_as_uint8', False)
             if self.dataset_config.cache_tensors_to_disk:
-                if not self.is_audio_model:
+                if not self.is_audio_model and not file_item.is_audio_only:
                     tensor_uint8 = _latent_to_uint8(file_item.tensor).cpu()
                     if to_disk:
                         state_dict['tensor'] = tensor_uint8
@@ -2007,9 +2007,13 @@ class LatentCachingMixin:
                     if to_memory:
                         file_item._cached_waveform_int16 = waveform_int16
                         file_item._cached_waveform_sample_rate = sample_rate
+            imgs = None
             try:
-                imgs = file_item.tensor.unsqueeze(0).to(device, dtype=dtype)
-                latent = self.sd.encode_images(imgs).squeeze(0)
+                if file_item.is_audio_only:
+                    latent = self.sd.encode_audio([file_item.audio_data]).squeeze(0)
+                else:
+                    imgs = file_item.tensor.unsqueeze(0).to(device, dtype=dtype)
+                    latent = self.sd.encode_images(imgs).squeeze(0)
                 if to_disk:
                     if cache_uint8:
                         state_dict['latent'] = _latent_to_uint8(latent).cpu()
@@ -2036,8 +2040,13 @@ class LatentCachingMixin:
                     else:
                         state_dict['first_frame_latent'] = first_frame_latent.clone().detach().cpu()
 
-            # audio (video+audio models only — audio-only models already encoded above via encode_images)
-            if not self.is_audio_model and file_item.audio_data is not None:
+            # Joint video+audio sidecar. Audio-only datasets already encoded
+            # their waveform as the primary latent above.
+            if (
+                not self.is_audio_model
+                and not file_item.is_audio_only
+                and file_item.audio_data is not None
+            ):
                 audio_latent = self.sd.encode_audio([file_item.audio_data]).squeeze(0)
                 if to_disk:
                     state_dict['audio_latent'] = audio_latent.clone().detach().cpu()

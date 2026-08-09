@@ -59,9 +59,13 @@ class FileItemDTO(
     def __init__(self, *args, **kwargs):
         self.path = kwargs.get("path", "")
         self.dataset_config: "DatasetConfig" = kwargs.get("dataset_config", None)
+        self.is_audio_only = self.dataset_config.is_audio_only
         # a video dataset can contain both videos and images. Images are
         # treated as single-frame items and bucketed separately from videos
-        dataset_is_video = self.dataset_config.num_frames > 1 or self.dataset_config.auto_frame_count
+        dataset_is_video = (
+            not self.is_audio_only
+            and (self.dataset_config.num_frames > 1 or self.dataset_config.auto_frame_count)
+        )
         self.is_video = dataset_is_video and os.path.splitext(self.path)[1].lower() in video_extensions
         self.is_audio_model = kwargs.get("is_audio_model", False)
         self.sample_rate = kwargs.get("sample_rate", 48000)
@@ -108,14 +112,20 @@ class FileItemDTO(
                 use_db_entry = True
         video_total_frames = None
         video_fps = None
-        if self.is_audio_model:
+        if self.is_audio_model or self.is_audio_only:
             # get the length of the audio file in ms
             with av.open(self.path) as c:
-                if c.duration is not None:
-                    w =  int(c.duration / 1_000)
-                else:
-                    s = c.streams.audio[0]
+                if len(c.streams.audio) == 0:
+                    raise ValueError(f"No audio stream found in {self.path}")
+                s = c.streams.audio[0]
+                if s.duration is not None and s.time_base is not None:
                     w = int(float(s.duration * s.time_base) * 1_000)
+                elif c.duration is not None:
+                    w = int(c.duration / 1_000)
+                else:
+                    raise ValueError(f"Could not determine audio duration for {self.path}")
+                if self.is_audio_only:
+                    w = round(self.dataset_config.audio_duration_seconds * 1_000)
             h = 1
         elif self.is_video:
             # video entries also carry (total_frames, fps); older 3-item entries

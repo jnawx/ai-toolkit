@@ -1088,7 +1088,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 dtype = get_torch_dtype(self.train_config.dtype)
                 imgs = None
                 is_reg = any(batch.get_is_reg_list())
-                if batch.tensor is not None:
+                is_audio_only = batch.dataset_config.is_audio_only
+                if batch.tensor is not None and not is_audio_only:
                     imgs = batch.tensor
                     imgs = imgs.to(self.device_torch, dtype=dtype)
                     # dont adjust for regs.
@@ -1099,8 +1100,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     latents = batch.latents.to(self.device_torch, dtype=dtype)
                     batch.latents = latents
                 else:
+                    if is_audio_only:
+                        latents = self.sd.encode_audio(batch.audio_data)
+                        batch.latents = latents
                     # normalize to
-                    if self.train_config.standardize_images:
+                    elif self.train_config.standardize_images:
                         if self.sd.is_xl or self.sd.is_vega or self.sd.is_ssd:
                             target_mean_list = [0.0002, -0.1034, -0.1879]
                             target_std_list = [0.5436, 0.5116, 0.5033]
@@ -1123,10 +1127,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                         # show_tensors(imgs, 'imgs')
 
-                    latents = self.sd.encode_images(imgs)
-                    batch.latents = latents
+                    if not is_audio_only:
+                        latents = self.sd.encode_images(imgs)
+                        batch.latents = latents
 
-                if self.train_config.standardize_latents:
+                if self.train_config.standardize_latents and not is_audio_only:
                     if self.sd.is_xl or self.sd.is_vega or self.sd.is_ssd:
                         target_mean_list = [-0.1075, 0.0231, -0.0135, 0.2164]
                         target_std_list = [0.8979, 0.7505, 0.9150, 0.7451]
@@ -1321,7 +1326,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                 # add dynamic noise offset. Dynamic noise is offsetting the noise to the same channelwise mean as the latents
                 # this will negate any noise offsets
-                if self.train_config.dynamic_noise_offset and not is_reg:
+                if self.train_config.dynamic_noise_offset and not is_reg and not is_audio_only:
                     latents_channel_mean = latents.mean(dim=(2, 3), keepdim=True) / 2
                     # subtract channel mean to that we compensate for the mean of the latents on the noise offset per channel
                     noise = noise + latents_channel_mean
@@ -1387,7 +1392,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 latent_multiplier = self.train_config.latent_multiplier
 
                 # handle adaptive scaling mased on std
-                if self.train_config.adaptive_scaling_factor:
+                if self.train_config.adaptive_scaling_factor and not is_audio_only:
                     std = latents.std(dim=(2, 3), keepdim=True)
                     normalizer = 1 / (std + 1e-6)
                     latent_multiplier = normalizer
@@ -1411,7 +1416,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     batch.unconditional_latents = batch.unconditional_latents * self.train_config.latent_multiplier
 
 
-                noisy_latents = self.sd.add_noise(latents, noise, timesteps)
+                noisy_latents = self.sd.add_noise(
+                    latents, noise, timesteps, batch=batch
+                )
 
                 # determine scaled noise
                 # todo do we need to scale this or does it always predict full intensity

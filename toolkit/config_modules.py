@@ -939,7 +939,17 @@ class DatasetConfig:
             self.caption_ext = '.' + self.caption_ext
         self.random_scale: bool = kwargs.get('random_scale', False)
         self.random_crop: bool = kwargs.get('random_crop', False)
-        self.resolution: int = kwargs.get('resolution', 512)
+        raw_resolution = kwargs.get('resolution', 512)
+        # Empty resolutions plus do_audio is the user-facing audio-only switch.
+        # Preprocessed configs carry is_audio_only explicitly and use an
+        # internal canonical resolution for MiniMax-H3 rotary coordinates.
+        self.is_audio_only: bool = kwargs.get(
+            'is_audio_only',
+            isinstance(raw_resolution, list)
+            and len(raw_resolution) == 0
+            and kwargs.get('do_audio', False),
+        )
+        self.resolution: int = 768 if self.is_audio_only else raw_resolution
         self.scale: float = kwargs.get('scale', 1.0)
         self.buckets: bool = kwargs.get('buckets', True)
         self.bucket_tolerance: int = kwargs.get('bucket_tolerance', 64)
@@ -1083,6 +1093,7 @@ class DatasetConfig:
         
         self.do_i2v: bool = kwargs.get('do_i2v', False)  # do image to video on models that are both t2i and i2v capable
         self.do_audio: bool = kwargs.get('do_audio', False) # load audio from video files for models that support it
+        self.audio_duration_seconds: float = float(kwargs.get('audio_duration_seconds', 5.0))
         self.audio_preserve_pitch: bool = kwargs.get('audio_preserve_pitch', False) # preserve pitch when stretching audio to fit num_frames
         self.audio_normalize: bool = kwargs.get('audio_normalize', False) # normalize audio volume levels when loading
 
@@ -1097,6 +1108,17 @@ def preprocess_dataset_raw_config(raw_config: List[dict]) -> List[dict]:
     new_config = []
     for dataset in raw_config:
         resolution = dataset.get('resolution', 512)
+        if isinstance(resolution, list) and len(resolution) == 0:
+            if dataset.get('do_audio', False):
+                dataset_copy = dataset.copy()
+                dataset_copy['is_audio_only'] = True
+                # MiniMax-H3 uses a canonical 768px canvas to position its
+                # audio rows. No image or video data is loaded for this mode.
+                dataset_copy['resolution'] = 768
+                new_config.append(dataset_copy)
+            # Preserve the existing behavior when do_audio is off: an empty
+            # resolution list expands to no datasets.
+            continue
         if isinstance(resolution, list):
             resolution_list = resolution
         else:
@@ -1470,6 +1492,20 @@ def validate_configs(
     save_config: SaveConfig,
     dataset_configs: List[DatasetConfig]
 ):
+    audio_only_datasets = [dataset for dataset in dataset_configs if dataset.is_audio_only]
+    if audio_only_datasets:
+        if model_config.arch != 'minimax_h3':
+            raise ValueError("Audio-only datasets are currently supported only by MiniMax-H3")
+        for dataset in audio_only_datasets:
+            if dataset.audio_duration_seconds <= 0:
+                raise ValueError("audio_duration_seconds must be greater than zero")
+            if dataset.do_i2v:
+                raise ValueError("do_i2v cannot be used with an audio-only dataset")
+            if dataset.controls:
+                raise ValueError("controls cannot be used with an audio-only dataset")
+            if dataset.alpha_mask or dataset.mask_path:
+                raise ValueError("image masks cannot be used with an audio-only dataset")
+
     if model_config.is_flux:
         if save_config.save_format != 'diffusers':
             # make it diffusers

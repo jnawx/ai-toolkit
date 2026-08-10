@@ -19,7 +19,11 @@ from tqdm import tqdm
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection, SiglipImageProcessor
 
 from toolkit.audio.preserve_pitch import time_stretch_preserve_pitch
-from toolkit.audio.processing import prepare_audio_for_training, waveform_to_stereo
+from toolkit.audio.processing import (
+    load_audio_segment,
+    prepare_audio_for_training,
+    waveform_to_stereo,
+)
 from toolkit.basic import flush, value_map
 from toolkit.buckets import get_bucket_for_image_size, get_resolution
 from toolkit.config_modules import ControlTypes
@@ -440,16 +444,21 @@ class AudioProcessingDTOMixin:
         try:
             import torchaudio
 
-            waveform, sample_rate = torchaudio.load(self.path)  # [channels, samples]
             if self.is_audio_only:
+                waveform, sample_rate = load_audio_segment(
+                    self.path,
+                    self.audio_segment,
+                    self.audio_source_sample_rate,
+                )
                 waveform = prepare_audio_for_training(
                     waveform,
                     sample_rate=sample_rate,
                     target_sample_rate=self.sample_rate,
-                    duration_seconds=self.dataset_config.audio_duration_seconds,
+                    duration_seconds=self.audio_segment.target_duration_seconds,
                     normalize=self.dataset_config.audio_normalize,
                 )
             else:
+                waveform, sample_rate = torchaudio.load(self.path)  # [channels, samples]
                 waveform = waveform_to_stereo(waveform)
                 if sample_rate != self.sample_rate:
                     waveform = torchaudio.functional.resample(
@@ -1790,7 +1799,11 @@ class LatentCachingFileItemDTOMixin:
         if self.is_audio_only:
             item["is_audio_only"] = True
             item["sample_rate"] = self.sample_rate
-            item["audio_duration_seconds"] = self.dataset_config.audio_duration_seconds
+            item["audio_max_segment_seconds"] = self.dataset_config.audio_duration_seconds
+            item["audio_segment_start_seconds"] = self.audio_segment.start_seconds
+            item["audio_segment_duration_seconds"] = self.audio_segment.duration_seconds
+            item["audio_target_duration_seconds"] = self.audio_segment.target_duration_seconds
+            item["audio_segmentation_version"] = 1
             item["audio_normalize"] = self.dataset_config.audio_normalize
         if self.dataset_config.cache_tensors_to_disk:
             # tensor is stored in the cache file, invalidate caches made without it

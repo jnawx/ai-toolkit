@@ -118,11 +118,12 @@ const docs: { [key: string]: ConfigDoc } = {
     ),
   },
   'datasets.audio_duration_seconds': {
-    title: 'Audio Duration',
+    title: 'Maximum Audio Segment Duration',
     description: (
       <>
-        Fixed duration used by an audio-only dataset. Longer files are center-cropped and shorter files are padded with
-        silence so batches and latent caches have a consistent shape.
+        Maximum segment length for an audio-only dataset. Short files keep their natural duration and are padded only to
+        the next whole-second duration bucket. Longer files are divided into evenly sized segments so the full audio
+        stream is used.
       </>
     ),
   },

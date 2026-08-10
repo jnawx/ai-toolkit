@@ -1318,7 +1318,7 @@ export default function SimpleJob({
                         )}
                         {modelArch?.additionalSections?.includes('datasets.audio_duration_seconds') && isAudioOnlyDataset(dataset) && (
                           <NumberInput
-                            label="Audio Duration (seconds)"
+                            label="Maximum Audio Segment Length (seconds)"
                             className="pt-2"
                             value={dataset.audio_duration_seconds ?? 5.0}
                             onChange={value =>

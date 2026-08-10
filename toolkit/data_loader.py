@@ -17,6 +17,7 @@ from tqdm import tqdm
 import albumentations as A
 
 from toolkit import image_utils
+from toolkit.audio.processing import plan_audio_segments
 from toolkit.buckets import get_bucket_for_image_size, BucketResolution
 from toolkit.config_modules import DatasetConfig, preprocess_dataset_raw_config
 from toolkit.dataloader_mixins import CaptionMixin, BucketsMixin, LatentCachingMixin, Augments, CLIPCachingMixin, ControlCachingMixin, TextEmbeddingCachingMixin
@@ -476,7 +477,9 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
 
         # this might take a while
         print_acc(f"Dataset: {self.dataset_path}")
-        if self.is_video:
+        if self.is_audio_only:
+            print_acc("  -  Preprocessing audio durations")
+        elif self.is_video:
             print_acc(f"  -  Preprocessing video dimensions")
         else:
             print_acc(f"  -  Preprocessing image dimensions")
@@ -531,6 +534,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                 temporal_compression = self.sd.unet.config.temporal_compression_ratio
         
         bad_count = 0
+        audio_source_count = 0
         for file in tqdm(file_list):
             try:
                 file_item = FileItemDTO(
@@ -555,7 +559,18 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                         else 48000
                     ),
                 )
-                self.file_list.append(file_item)
+                if self.is_audio_only:
+                    segments = plan_audio_segments(
+                        source_duration_seconds=file_item.audio_source_duration_seconds,
+                        max_segment_seconds=self.dataset_config.audio_duration_seconds,
+                    )
+                    audio_source_count += 1
+                    for segment in segments:
+                        segment_item = copy.deepcopy(file_item)
+                        segment_item.set_audio_segment(segment)
+                        self.file_list.append(segment_item)
+                else:
+                    self.file_list.append(file_item)
             except Exception as e:
                 print_acc(traceback.format_exc())
                 if self.is_audio_only:
@@ -572,7 +587,10 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             json.dump(self.size_database, f)
         
         if self.is_audio_only:
-            print_acc(f"  -  Found {len(self.file_list)} audio sources")
+            print_acc(
+                f"  -  Found {audio_source_count} audio sources "
+                f"yielding {len(self.file_list)} training segments"
+            )
             assert len(self.file_list) > 0, f"no audio sources found in {self.dataset_path}"
         elif self.is_video:
             num_videos = len([x for x in self.file_list if x.is_video])

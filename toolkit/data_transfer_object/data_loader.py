@@ -8,6 +8,7 @@ from PIL.ImageOps import exif_transpose
 import av
             
 from toolkit import image_utils
+from toolkit.audio.processing import AudioSegment, stack_audio_latents
 from toolkit.basic import get_quick_signature_string
 from toolkit.dataloader_mixins import (
     CaptionProcessingDTOMixin,
@@ -69,6 +70,9 @@ class FileItemDTO(
         self.is_video = dataset_is_video and os.path.splitext(self.path)[1].lower() in video_extensions
         self.is_audio_model = kwargs.get("is_audio_model", False)
         self.sample_rate = kwargs.get("sample_rate", 48000)
+        self.audio_source_duration_seconds = None
+        self.audio_source_sample_rate = None
+        self.audio_segment = None
         self.num_frames = self.dataset_config.num_frames if self.is_video else 1
         self.temporal_compression = kwargs.get("temporal_compression", 8)
         # module-level function (picklable) for models whose valid frame
@@ -119,13 +123,24 @@ class FileItemDTO(
                     raise ValueError(f"No audio stream found in {self.path}")
                 s = c.streams.audio[0]
                 if s.duration is not None and s.time_base is not None:
-                    w = int(float(s.duration * s.time_base) * 1_000)
+                    self.audio_source_duration_seconds = float(s.duration * s.time_base)
                 elif c.duration is not None:
-                    w = int(c.duration / 1_000)
+                    self.audio_source_duration_seconds = float(c.duration / 1_000_000)
                 else:
                     raise ValueError(f"Could not determine audio duration for {self.path}")
+                codec_context = getattr(s, "codec_context", None)
+                source_sample_rate = getattr(codec_context, "sample_rate", None)
+                if not source_sample_rate:
+                    source_sample_rate = getattr(s, "rate", None)
+                if source_sample_rate:
+                    self.audio_source_sample_rate = int(source_sample_rate)
+                w = max(1, round(self.audio_source_duration_seconds * 1_000))
                 if self.is_audio_only:
-                    w = round(self.dataset_config.audio_duration_seconds * 1_000)
+                    self.audio_segment = AudioSegment(
+                        start_seconds=0.0,
+                        duration_seconds=self.audio_source_duration_seconds,
+                        target_duration_seconds=self.audio_source_duration_seconds,
+                    )
             h = 1
         elif self.is_video:
             # video entries also carry (total_frames, fps); older 3-item entries
@@ -203,6 +218,15 @@ class FileItemDTO(
         self.audio_data = None
         self.audio_tensor = None
 
+    def set_audio_segment(self, segment: AudioSegment):
+        if not self.is_audio_only:
+            raise ValueError("audio segments can only be set on audio-only items")
+        self.audio_segment = segment
+        self.width = max(1, round(segment.target_duration_seconds * 1_000))
+        self.scale_to_width = self.width
+        self.crop_x = 0
+        self.crop_width = self.width
+
     def cleanup(self):
         self.tensor = None
         self.audio_data = None
@@ -221,6 +245,7 @@ class DataLoaderBatchDTO:
         try:
             self.file_items: List["FileItemDTO"] = kwargs.get("file_items", None)
             is_latents_cached = self.file_items[0].is_latent_cached
+            is_audio_only = self.file_items[0].is_audio_only
             self.tensor: Union[torch.Tensor, None] = None
             self.latents: Union[torch.Tensor, None] = None
             self.control_tensor: Union[torch.Tensor, None] = None
@@ -275,12 +300,17 @@ class DataLoaderBatchDTO:
             self.num_frames: int = self.file_items[0].num_frames
 
             if (
-                not is_latents_cached
-                or self.file_items[0].dataset_config.load_image_when_caching_latents
-                or self.file_items[0].dataset_config.cache_tensors_to_disk
+                not is_audio_only
+                and (
+                    not is_latents_cached
+                    or self.file_items[0].dataset_config.load_image_when_caching_latents
+                    or self.file_items[0].dataset_config.cache_tensors_to_disk
+                )
             ):
-                # only return a tensor if latents are not cached, or if we are explicitly
-                # loading the raw image alongside the cached latents
+                # Audio-only consumers use audio_data or packed latents directly;
+                # their duration-dependent raw waveform tensors are not concatenated.
+                # Visual datasets return a tensor when latents are not cached, or
+                # when raw images were explicitly requested alongside the cache.
                 self.tensor: torch.Tensor = torch.cat(
                     [x.tensor.unsqueeze(0) for x in self.file_items]
                 )
@@ -288,9 +318,13 @@ class DataLoaderBatchDTO:
             self.latents: Union[torch.Tensor, None] = None
             if is_latents_cached:
                 # this get_latent call with trigger loading all cached items from the disk
-                self.latents = torch.cat(
-                    [x.get_latent().unsqueeze(0) for x in self.file_items]
-                )
+                cached_latents = [x.get_latent() for x in self.file_items]
+                if is_audio_only:
+                    self.latents = stack_audio_latents(cached_latents)
+                else:
+                    self.latents = torch.cat(
+                        [latent.unsqueeze(0) for latent in cached_latents]
+                    )
                 if any(
                     [x._cached_first_frame_latent is not None for x in self.file_items]
                 ):
@@ -495,7 +529,9 @@ class DataLoaderBatchDTO:
                 
                 self.prompt_embeds = concat_prompt_embeds(prompt_embeds_list, padding_side=padding_side)
 
-            if any([x.audio_tensor is not None for x in self.file_items]):
+            if not is_audio_only and any(
+                [x.audio_tensor is not None for x in self.file_items]
+            ):
                 # find one to use as a base
                 base_audio_tensor = None
                 for x in self.file_items:

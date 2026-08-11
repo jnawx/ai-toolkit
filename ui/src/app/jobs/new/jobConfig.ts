@@ -95,6 +95,7 @@ export const defaultJobConfig: JobConfig = {
           dtype: 'bf16',
           diff_output_preservation: false,
           diff_output_preservation_multiplier: 1.0,
+          diff_output_preservation_every_n_steps: 1,
           diff_output_preservation_class: 'person',
           switch_boundary_every: 1,
           loss_type: 'mse',

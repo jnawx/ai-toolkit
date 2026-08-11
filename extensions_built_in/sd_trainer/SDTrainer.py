@@ -104,8 +104,8 @@ class SDTrainer(BaseSDTrainProcess):
             if self.network_config is None:
                 raise ValueError("blank_prompt_preservation requires a network to be set")
         
-        if self.train_config.blank_prompt_preservation or self.train_config.diff_output_preservation:
-            # always do a prior prediction when doing output preservation
+        if self.train_config.blank_prompt_preservation:
+            # DOP schedules its own prior prediction only on active interval steps.
             self.do_prior_prediction = True
         
         # store the loss target for a batch so we can use it in a loss
@@ -1319,6 +1319,12 @@ class SDTrainer(BaseSDTrainProcess):
     def end_of_training_loop(self):
         pass
 
+    def _should_run_diff_output_preservation(self) -> bool:
+        return (
+            self.train_config.diff_output_preservation
+            and self.step_num % self.train_config.diff_output_preservation_every_n_steps == 0
+        )
+
     def predict_noise(
         self,
         noisy_latents: torch.Tensor,
@@ -1349,6 +1355,11 @@ class SDTrainer(BaseSDTrainProcess):
     
 
     def train_single_accumulation(self, batch: DataLoaderBatchDTO):
+        do_diff_output_preservation = self._should_run_diff_output_preservation()
+        if self.train_config.diff_output_preservation and not do_diff_output_preservation:
+            self.additional_logs.pop('loss/normal', None)
+            self.additional_logs.pop('loss/preservation', None)
+            self.additional_logs.pop('loss/preservation_audio', None)
         with torch.no_grad():
             self.timer.start('preprocess_batch')
             if isinstance(self.adapter, CustomAdapter):
@@ -1680,7 +1691,7 @@ class SDTrainer(BaseSDTrainProcess):
                                     [unconditional_embeds] * noisy_latents.shape[0]
                                 )
 
-                            if self.train_config.diff_output_preservation:
+                            if do_diff_output_preservation:
                                 if batch.dop_prompt_embeds is not None:
                                     # cached to disk with the trigger word replaced per dataset
                                     self.diff_output_preservation_embeds = batch.dop_prompt_embeds.clone().detach().to(
@@ -1755,7 +1766,7 @@ class SDTrainer(BaseSDTrainProcess):
                                 if isinstance(self.adapter, CustomAdapter):
                                     self.adapter.is_unconditional_run = False
                             
-                            if self.train_config.diff_output_preservation:
+                            if do_diff_output_preservation:
                                 # datasets can have their own trigger words, replace per item
                                 def replace_trigger_with_class(prompt, file_item):
                                     trigger = file_item.trigger_word if file_item.trigger_word is not None else self.trigger_word
@@ -1954,11 +1965,11 @@ class SDTrainer(BaseSDTrainProcess):
                         do_guidance_prior = True
 
                 if ((
-                        has_adapter_img and self.assistant_adapter and match_adapter_assist) or self.do_prior_prediction or do_guidance_prior or do_reg_prior or do_inverted_masked_prior or self.train_config.correct_pred_norm):
+                        has_adapter_img and self.assistant_adapter and match_adapter_assist) or self.do_prior_prediction or do_diff_output_preservation or do_guidance_prior or do_reg_prior or do_inverted_masked_prior or self.train_config.correct_pred_norm):
                     with self.timer('prior predict'):
                         prior_embeds_to_use = conditional_embeds
                         # use diff_output_preservation embeds if doing dfe
-                        if self.train_config.diff_output_preservation:
+                        if do_diff_output_preservation:
                             prior_embeds_to_use = self.diff_output_preservation_embeds.expand_to_batch(noisy_latents.shape[0])
                         
                         if self.train_config.blank_prompt_preservation:
@@ -2149,7 +2160,7 @@ class SDTrainer(BaseSDTrainProcess):
                         prior_to_calculate_loss = prior_pred
                         # if we are doing diff_output_preservation and not noing inverted masked prior
                         # then we need to send none here so it will not target the prior
-                        doing_preservation = self.train_config.diff_output_preservation or self.train_config.blank_prompt_preservation
+                        doing_preservation = do_diff_output_preservation or self.train_config.blank_prompt_preservation
                         if doing_preservation and not do_inverted_masked_prior:
                             prior_to_calculate_loss = None
                         
@@ -2163,9 +2174,9 @@ class SDTrainer(BaseSDTrainProcess):
                             prior_pred=prior_to_calculate_loss,
                         )
                     
-                    if self.train_config.diff_output_preservation or self.train_config.blank_prompt_preservation:
+                    if do_diff_output_preservation or self.train_config.blank_prompt_preservation:
                         with torch.no_grad():
-                            if self.train_config.diff_output_preservation:
+                            if do_diff_output_preservation:
                                 preservation_embeds = self.diff_output_preservation_embeds.expand_to_batch(noisy_latents.shape[0])
                             elif self.train_config.blank_prompt_preservation:
                                 blank_embeds = self.cached_blank_embeds.clone().detach().to(
@@ -2184,7 +2195,7 @@ class SDTrainer(BaseSDTrainProcess):
                             **pred_kwargs
                         )
                         batch.audio_pred_slot = None
-                        multiplier = self.train_config.diff_output_preservation_multiplier if self.train_config.diff_output_preservation else self.train_config.blank_prompt_preservation_multiplier
+                        multiplier = self.train_config.diff_output_preservation_multiplier if do_diff_output_preservation else self.train_config.blank_prompt_preservation_multiplier
                         preservation_loss = torch.nn.functional.mse_loss(preservation_pred, prior_pred) * multiplier
                         self.additional_logs['loss/normal'] = loss.item()
                         self.additional_logs['loss/preservation'] = preservation_loss.item()

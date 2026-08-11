@@ -489,6 +489,14 @@ class TrainConfig:
         # DOP will will run the same image and prompt through the network without the trigger word blank and use it as a target
         self.diff_output_preservation = kwargs.get('diff_output_preservation', False)
         self.diff_output_preservation_multiplier = kwargs.get('diff_output_preservation_multiplier', 1.0)
+        diff_output_preservation_interval = kwargs.get('diff_output_preservation_every_n_steps', 1)
+        try:
+            diff_output_preservation_interval = float(diff_output_preservation_interval)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("diff_output_preservation_every_n_steps must be a positive integer") from exc
+        if not diff_output_preservation_interval.is_integer() or diff_output_preservation_interval < 1:
+            raise ValueError("diff_output_preservation_every_n_steps must be a positive integer")
+        self.diff_output_preservation_every_n_steps = int(diff_output_preservation_interval)
         # If the trigger word is in the prompt, we will use this class name to replace it eg. "sks woman" -> "woman"
         self.diff_output_preservation_class = kwargs.get('diff_output_preservation_class', '')
         

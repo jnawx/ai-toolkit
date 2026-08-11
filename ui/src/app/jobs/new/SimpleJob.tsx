@@ -861,6 +861,21 @@ export default function SimpleJob({
                           placeholder="eg. 1.0"
                           min={0}
                         />
+                        <NumberInput
+                          label="DOP Every N Steps"
+                          className="pt-2"
+                          value={jobConfig.config.process[0].train.diff_output_preservation_every_n_steps ?? 1}
+                          onChange={value =>
+                            setJobConfig(
+                              Math.max(1, Math.round(value ?? 1)),
+                              'config.process[0].train.diff_output_preservation_every_n_steps',
+                            )
+                          }
+                          placeholder="eg. 1"
+                          min={1}
+                          required
+                          docKey="train.diff_output_preservation_every_n_steps"
+                        />
                         <TextInput
                           label="DOP Preservation Class"
                           className="pt-2 pb-4"

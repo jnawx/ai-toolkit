@@ -154,6 +154,7 @@ export interface TrainConfig {
   disable_sampling: boolean;
   diff_output_preservation: boolean;
   diff_output_preservation_multiplier: number;
+  diff_output_preservation_every_n_steps: number;
   diff_output_preservation_class: string;
   blank_prompt_preservation?: boolean;
   blank_prompt_preservation_multiplier?: number;

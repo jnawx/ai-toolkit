@@ -269,10 +269,19 @@ const docs: { [key: string]: ConfigDoc } = {
         a woman. We want to teach the model to remember what it knows about the class "woman" while teaching it what is
         different about Alice. During training, the trainer will make a prediction with your LoRA bypassed and your
         trigger word in the prompt replaced with the class word. Making "photo of Alice" become "photo of woman". This
-        prediction is called the prior prediction. Each step, we will do the normal training step, but also do another
-        step with this prior prediction and the class prompt in order to teach our LoRA to preserve the knowledge of the
-        class. This should not only improve the performance of your trained concept, but also allow you to do things
+        prediction is called the prior prediction. On scheduled DOP steps, we will do the normal training step, but also
+        do another step with this prior prediction and the class prompt in order to teach our LoRA to preserve the
+        knowledge of the class. This should not only improve the performance of your trained concept, but also allow you to do things
         like "Alice standing next to a woman" and not make both of the people look like Alice.
+      </>
+    ),
+  },
+  'train.diff_output_preservation_every_n_steps': {
+    title: 'DOP Every N Steps',
+    description: (
+      <>
+        Controls how often Differential Output Preservation runs. A value of 1 runs DOP on every training step. Larger
+        values run it immediately and then once every N training steps, skipping both extra DOP model passes in between.
       </>
     ),
   },

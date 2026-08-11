@@ -1316,20 +1316,6 @@ export default function SimpleJob({
                             docKey="datasets.do_audio"
                           />
                         )}
-                        {modelArch?.additionalSections?.includes('datasets.audio_duration_seconds') && isAudioOnlyDataset(dataset) && (
-                          <NumberInput
-                            label="Maximum Audio Segment Length (seconds)"
-                            className="pt-2"
-                            value={dataset.audio_duration_seconds ?? 5.0}
-                            onChange={value =>
-                              setJobConfig(value, `config.process[0].datasets[${i}].audio_duration_seconds`)
-                            }
-                            placeholder="eg. 5.0"
-                            min={0.1}
-                            required
-                            docKey="datasets.audio_duration_seconds"
-                          />
-                        )}
                         {modelArch?.additionalSections?.includes('datasets.audio_normalize') && (
                           <Checkbox
                             label="Audio Normalize"

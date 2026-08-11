@@ -95,18 +95,16 @@ class AudioWaveformPreparationTests(unittest.TestCase):
 
 
 class AudioSegmentationTests(unittest.TestCase):
-    def test_short_audio_keeps_natural_length_in_duration_bucket(self):
-        from toolkit.audio.processing import plan_audio_segments
+    def test_audio_uses_next_whole_second_duration_bucket(self):
+        from toolkit.audio.processing import plan_audio_segment
 
-        segments = plan_audio_segments(
+        segment = plan_audio_segment(
             source_duration_seconds=2.4,
-            max_segment_seconds=5.0,
         )
 
-        self.assertEqual(len(segments), 1)
-        self.assertAlmostEqual(segments[0].start_seconds, 0.0)
-        self.assertAlmostEqual(segments[0].duration_seconds, 2.4)
-        self.assertAlmostEqual(segments[0].target_duration_seconds, 3.0)
+        self.assertAlmostEqual(segment.start_seconds, 0.0)
+        self.assertAlmostEqual(segment.duration_seconds, 2.4)
+        self.assertAlmostEqual(segment.target_duration_seconds, 3.0)
 
     def test_variable_audio_latents_are_padded_to_the_batch_maximum(self):
         from toolkit.audio.processing import stack_audio_latents
@@ -121,38 +119,20 @@ class AudioSegmentationTests(unittest.TestCase):
         torch.testing.assert_close(batch[0, 4:], torch.zeros(2, 32))
         torch.testing.assert_close(batch[1], long)
 
-    def test_long_audio_is_evenly_split_without_losing_content(self):
+    def test_long_audio_remains_one_segment_in_its_duration_bucket(self):
         from toolkit.audio.processing import (
             audio_segment_frame_range,
-            plan_audio_segments,
+            plan_audio_segment,
         )
 
-        segments = plan_audio_segments(
-            source_duration_seconds=12.0,
-            max_segment_seconds=5.0,
+        segment = plan_audio_segment(
+            source_duration_seconds=12.4,
         )
 
-        self.assertEqual(len(segments), 3)
-        self.assertEqual(
-            [segment.start_seconds for segment in segments],
-            [0.0, 4.0, 8.0],
-        )
-        self.assertEqual(
-            [segment.duration_seconds for segment in segments],
-            [4.0, 4.0, 4.0],
-        )
-        self.assertEqual(
-            [segment.target_duration_seconds for segment in segments],
-            [4.0, 4.0, 4.0],
-        )
-        self.assertAlmostEqual(
-            segments[-1].start_seconds + segments[-1].duration_seconds,
-            12.0,
-        )
-        self.assertEqual(
-            [audio_segment_frame_range(segment, 10) for segment in segments],
-            [(0, 40), (40, 40), (80, 40)],
-        )
+        self.assertAlmostEqual(segment.start_seconds, 0.0)
+        self.assertAlmostEqual(segment.duration_seconds, 12.4)
+        self.assertAlmostEqual(segment.target_duration_seconds, 13.0)
+        self.assertEqual(audio_segment_frame_range(segment, 10), (0, 124))
 
     def test_audio_segment_loader_reads_only_the_planned_source_range(self):
         from toolkit.audio.processing import AudioSegment, load_audio_segment
@@ -206,7 +186,7 @@ class AudioSegmentationTests(unittest.TestCase):
         from toolkit.audio.processing import (
             AudioSegment,
             load_audio_segment,
-            plan_audio_segments,
+            plan_audio_segment,
             prepare_audio_for_training,
         )
         from toolkit.data_transfer_object.data_loader import (
@@ -226,7 +206,6 @@ class AudioSegmentationTests(unittest.TestCase):
                 folder_path=temp_dir,
                 resolution=[],
                 do_audio=True,
-                audio_duration_seconds=5.0,
                 buckets=False,
             )
             file_item = FileItemDTO(
@@ -236,14 +215,11 @@ class AudioSegmentationTests(unittest.TestCase):
                 dataset_root=temp_dir,
                 sample_rate=32000,
             )
-            segments = plan_audio_segments(
+            segment = plan_audio_segment(
                 file_item.audio_source_duration_seconds,
-                dataset_config.audio_duration_seconds,
             )
-            segment_items = [copy.deepcopy(file_item) for _ in segments]
-            for segment_item, segment in zip(segment_items, segments):
-                segment_item.set_audio_segment(segment)
-            segment_item = segment_items[0]
+            segment_item = copy.deepcopy(file_item)
+            segment_item.set_audio_segment(segment)
             waveform, sample_rate = load_audio_segment(
                 str(audio_path),
                 segment_item.audio_segment,
@@ -261,21 +237,21 @@ class AudioSegmentationTests(unittest.TestCase):
             for item in raw_items:
                 item.load_and_process_audio()
             raw_batch = DataLoaderBatchDTO(file_items=raw_items)
-            for item, row_count in zip(segment_items, (4, 6)):
+            for item, row_count in zip(raw_items, (4, 6)):
                 item._encoded_latent = torch.ones(row_count, 32)
                 item.is_latent_cached = True
-            cached_batch = DataLoaderBatchDTO(file_items=segment_items)
+            cached_batch = DataLoaderBatchDTO(file_items=raw_items)
 
         self.assertAlmostEqual(file_item.audio_source_duration_seconds, 5.1)
-        self.assertEqual(len(segment_items), 2)
-        self.assertEqual(segment_item.width, 3000)
-        self.assertEqual(segment_item.crop_width, 3000)
-        self.assertAlmostEqual(segment_item.audio_segment.duration_seconds, 2.55)
+        self.assertEqual(segment_item.width, 6000)
+        self.assertEqual(segment_item.crop_width, 6000)
+        self.assertAlmostEqual(segment_item.audio_segment.duration_seconds, 5.1)
+        self.assertAlmostEqual(segment_item.audio_segment.target_duration_seconds, 6.0)
         self.assertNotEqual(
-            segment_items[0].get_latent_path(),
-            segment_items[1].get_latent_path(),
+            segment_item.get_latent_path(),
+            short_item.get_latent_path(),
         )
-        self.assertEqual(tuple(prepared.shape), (2, 96000))
+        self.assertEqual(tuple(prepared.shape), (2, 192000))
         self.assertIsNone(raw_batch.tensor)
         self.assertIsNone(raw_batch.audio_tensor)
         self.assertEqual(len(raw_batch.audio_data), 2)
@@ -383,6 +359,17 @@ class AudioOnlyDatasetConfigTests(unittest.TestCase):
         self.assertTrue(config.is_audio_only)
         self.assertTrue(config.do_audio)
         self.assertEqual(config.resolution, 768)
+
+    def test_legacy_audio_maximum_is_ignored(self):
+        config = DatasetConfig(
+            folder_path="audio",
+            resolution=768,
+            do_audio=True,
+            is_audio_only=True,
+            audio_duration_seconds=0.1,
+        )
+
+        self.assertFalse(hasattr(config, "audio_duration_seconds"))
 
     def test_selected_resolutions_without_audio_keep_visual_behavior(self):
         processed = preprocess_dataset_raw_config(

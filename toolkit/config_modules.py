@@ -1097,8 +1097,6 @@ class DatasetConfig:
         
         self.do_i2v: bool = kwargs.get('do_i2v', False)  # do image to video on models that are both t2i and i2v capable
         self.do_audio: bool = kwargs.get('do_audio', False) # load audio from video files for models that support it
-        # Audio-only files retain dynamic lengths; this caps deterministic segments.
-        self.audio_duration_seconds: float = float(kwargs.get('audio_duration_seconds', 5.0))
         self.audio_preserve_pitch: bool = kwargs.get('audio_preserve_pitch', False) # preserve pitch when stretching audio to fit num_frames
         self.audio_normalize: bool = kwargs.get('audio_normalize', False) # normalize audio volume levels when loading
 
@@ -1502,8 +1500,6 @@ def validate_configs(
         if model_config.arch != 'minimax_h3':
             raise ValueError("Audio-only datasets are currently supported only by MiniMax-H3")
         for dataset in audio_only_datasets:
-            if dataset.audio_duration_seconds <= 0:
-                raise ValueError("audio_duration_seconds must be greater than zero")
             if dataset.do_i2v:
                 raise ValueError("do_i2v cannot be used with an audio-only dataset")
             if dataset.controls:

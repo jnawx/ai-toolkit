@@ -1809,11 +1809,10 @@ class LatentCachingFileItemDTOMixin:
         if self.is_audio_only:
             item["is_audio_only"] = True
             item["sample_rate"] = self.sample_rate
-            item["audio_max_segment_seconds"] = self.dataset_config.audio_duration_seconds
             item["audio_segment_start_seconds"] = self.audio_segment.start_seconds
             item["audio_segment_duration_seconds"] = self.audio_segment.duration_seconds
             item["audio_target_duration_seconds"] = self.audio_segment.target_duration_seconds
-            item["audio_segmentation_version"] = 1
+            item["audio_segmentation_version"] = 2
             item["audio_normalize"] = self.dataset_config.audio_normalize
         if self.dataset_config.cache_tensors_to_disk:
             # tensor is stored in the cache file, invalidate caches made without it

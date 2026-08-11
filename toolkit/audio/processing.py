@@ -12,42 +12,25 @@ class AudioSegment:
     target_duration_seconds: float
 
 
-def plan_audio_segments(
+def plan_audio_segment(
     source_duration_seconds: float,
-    max_segment_seconds: float,
     bucket_step_seconds: float = 1.0,
-) -> list[AudioSegment]:
-    """Plan contiguous audio segments and their padded duration buckets."""
+) -> AudioSegment:
+    """Assign a complete audio source to its padded duration bucket."""
     if source_duration_seconds <= 0:
         raise ValueError("source audio duration must be greater than zero")
-    if max_segment_seconds <= 0:
-        raise ValueError("maximum audio segment duration must be greater than zero")
     if bucket_step_seconds <= 0:
         raise ValueError("audio duration bucket step must be greater than zero")
 
-    segment_count = max(1, math.ceil(source_duration_seconds / max_segment_seconds))
-    nominal_duration_seconds = source_duration_seconds / segment_count
-    segments = []
-    for segment_index in range(segment_count):
-        start_seconds = segment_index * nominal_duration_seconds
-        end_seconds = min(
-            source_duration_seconds,
-            (segment_index + 1) * nominal_duration_seconds,
-        )
-        duration_seconds = end_seconds - start_seconds
-        target_duration_seconds = min(
-            max_segment_seconds,
-            max(1, math.ceil((duration_seconds / bucket_step_seconds) - 1e-9))
-            * bucket_step_seconds,
-        )
-        segments.append(
-            AudioSegment(
-                start_seconds=start_seconds,
-                duration_seconds=duration_seconds,
-                target_duration_seconds=target_duration_seconds,
-            )
-        )
-    return segments
+    target_duration_seconds = (
+        max(1, math.ceil((source_duration_seconds / bucket_step_seconds) - 1e-9))
+        * bucket_step_seconds
+    )
+    return AudioSegment(
+        start_seconds=0.0,
+        duration_seconds=source_duration_seconds,
+        target_duration_seconds=target_duration_seconds,
+    )
 
 
 def audio_segment_frame_range(
@@ -137,7 +120,7 @@ def prepare_audio_for_training(
 ) -> torch.Tensor:
     """Prepare a deterministic stereo waveform for one duration bucket."""
     if duration_seconds <= 0:
-        raise ValueError("audio_duration_seconds must be greater than zero")
+        raise ValueError("target audio duration must be greater than zero")
 
     waveform = waveform_to_stereo(waveform)
     if sample_rate != target_sample_rate:

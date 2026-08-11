@@ -113,17 +113,8 @@ const docs: { [key: string]: ConfigDoc } = {
       <>
         For models that support audio with video, this option loads audio alongside the visual sequence. If no dataset
         resolution is selected, MiniMax-H3 instead treats the dataset as audio only: direct audio files and the audio
-        streams of video containers are loaded without decoding video frames.
-      </>
-    ),
-  },
-  'datasets.audio_duration_seconds': {
-    title: 'Maximum Audio Segment Duration',
-    description: (
-      <>
-        Maximum segment length for an audio-only dataset. Short files keep their natural duration and are padded only to
-        the next whole-second duration bucket. Longer files are divided into evenly sized segments so the full audio
-        stream is used.
+        streams of video containers are loaded without decoding video frames. Each audio-only file remains intact and
+        is assigned automatically to the next whole-second duration bucket.
       </>
     ),
   },

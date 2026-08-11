@@ -22,7 +22,6 @@ type AdditionalSections =
   | 'datasets.multi_control_paths'
   | 'datasets.do_i2v'
   | 'datasets.do_audio'
-  | 'datasets.audio_duration_seconds'
   | 'datasets.audio_normalize'
   | 'datasets.audio_preserve_pitch'
   | 'datasets.auto_frame_count'
@@ -741,7 +740,7 @@ export const modelArchs: ModelArch[] = [
       ],
     },
     disableSections: ['network.conv'],
-    additionalSections: ['sample.ctrl_img', 'datasets.num_frames', 'model.layer_offloading', 'model.low_vram', 'datasets.do_audio', 'datasets.audio_duration_seconds', 'datasets.audio_normalize', 'datasets.audio_preserve_pitch', 'datasets.do_i2v', 'train.audio_loss_multiplier', 'datasets.auto_frame_count', 'model.assistant_lora_path'],
+    additionalSections: ['sample.ctrl_img', 'datasets.num_frames', 'model.layer_offloading', 'model.low_vram', 'datasets.do_audio', 'datasets.audio_normalize', 'datasets.audio_preserve_pitch', 'datasets.do_i2v', 'train.audio_loss_multiplier', 'datasets.auto_frame_count', 'model.assistant_lora_path'],
     modelNotes: (
       <div className="space-y-2">
         <p>

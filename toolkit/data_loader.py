@@ -17,7 +17,7 @@ from tqdm import tqdm
 import albumentations as A
 
 from toolkit import image_utils
-from toolkit.audio.processing import plan_audio_segments
+from toolkit.audio.processing import plan_audio_segment
 from toolkit.buckets import get_bucket_for_image_size, BucketResolution
 from toolkit.config_modules import DatasetConfig, preprocess_dataset_raw_config
 from toolkit.dataloader_mixins import CaptionMixin, BucketsMixin, LatentCachingMixin, Augments, CLIPCachingMixin, ControlCachingMixin, TextEmbeddingCachingMixin
@@ -560,15 +560,12 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                     ),
                 )
                 if self.is_audio_only:
-                    segments = plan_audio_segments(
+                    segment = plan_audio_segment(
                         source_duration_seconds=file_item.audio_source_duration_seconds,
-                        max_segment_seconds=self.dataset_config.audio_duration_seconds,
                     )
                     audio_source_count += 1
-                    for segment in segments:
-                        segment_item = copy.deepcopy(file_item)
-                        segment_item.set_audio_segment(segment)
-                        self.file_list.append(segment_item)
+                    file_item.set_audio_segment(segment)
+                    self.file_list.append(file_item)
                 else:
                     self.file_list.append(file_item)
             except Exception as e:

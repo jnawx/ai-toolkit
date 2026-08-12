@@ -2,6 +2,7 @@
 
 import { Job } from '@prisma/client';
 import useJobLossLog, { LossPoint } from '@/hooks/useJobLossLog';
+import { getTotalSteps } from '@/utils/jobs';
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
@@ -116,6 +117,7 @@ const PALETTE = [
 interface PersistedSettings {
   useLogScale: boolean;
   showTrend: boolean;
+  showFullRun: boolean;
   smoothing: number;
   plotStride: number;
   clipOutliers: boolean;
@@ -139,10 +141,12 @@ function dulledColor(rgba: string): string {
 
 export default function JobLossGraph({ job }: Props) {
   const { series, lossKeys, status, refreshLoss } = useJobLossLog(job.id, 2000);
+  const plannedSteps = getTotalSteps(job);
 
   // Controls
   const [useLogScale, setUseLogScale] = useState(false);
   const [showTrend, setShowTrend] = useState(true);
+  const [showFullRun, setShowFullRun] = useState(false);
 
   // 0..100 slider. 100 = no smoothing, 0 = heavy smoothing.
   const [smoothing, setSmoothing] = useState(80);
@@ -185,6 +189,7 @@ export default function JobLossGraph({ job }: Props) {
         const s = JSON.parse(raw) as Partial<PersistedSettings>;
         if (typeof s.useLogScale === 'boolean') setUseLogScale(s.useLogScale);
         if (typeof s.showTrend === 'boolean') setShowTrend(s.showTrend);
+        if (typeof s.showFullRun === 'boolean') setShowFullRun(s.showFullRun);
         if (typeof s.smoothing === 'number') setSmoothing(s.smoothing);
         if (typeof s.plotStride === 'number') setPlotStride(s.plotStride);
         if (typeof s.clipOutliers === 'boolean') setClipOutliers(s.clipOutliers);
@@ -205,12 +210,20 @@ export default function JobLossGraph({ job }: Props) {
     const key = settingsStorageKey();
     if (!key) return;
     try {
-      const payload: PersistedSettings = { useLogScale, showTrend, smoothing, plotStride, clipOutliers, enabled };
+      const payload: PersistedSettings = {
+        useLogScale,
+        showTrend,
+        showFullRun,
+        smoothing,
+        plotStride,
+        clipOutliers,
+        enabled,
+      };
       localStorage.setItem(key, JSON.stringify(payload));
     } catch {
       // ignore unavailable storage
     }
-  }, [hydrated, useLogScale, showTrend, smoothing, plotStride, clipOutliers, enabled]);
+  }, [hydrated, useLogScale, showTrend, showFullRun, smoothing, plotStride, clipOutliers, enabled]);
 
   // keep enabled map in sync with discovered keys. "loss/loss" and "val/loss"
   // are on by default; every other metric starts deactivated (user can toggle
@@ -222,7 +235,8 @@ export default function JobLossGraph({ job }: Props) {
     setEnabled(prev => {
       const next = { ...prev };
       for (const k of lossKeys) {
-        if (next[k] === undefined) next[k] = persistedEnabledRef.current?.[k] ?? (k === 'loss/loss' || k === 'val/loss');
+        if (next[k] === undefined)
+          next[k] = persistedEnabledRef.current?.[k] ?? (k === 'loss/loss' || k === 'val/loss');
       }
       for (const k of Object.keys(next)) {
         if (!lossKeys.includes(k)) delete next[k];
@@ -274,7 +288,15 @@ export default function JobLossGraph({ job }: Props) {
 
     // Each metric gets its own y-scale (so unrelated magnitudes auto-range
     // independently) plus a matching colored axis.
-    const scales: uPlot.Scales = { x: { time: false } };
+    const scales: uPlot.Scales = {
+      x: {
+        time: false,
+        range: (_u, dataMin, dataMax) => {
+          if (!showFullRun || plannedSteps <= 0) return [dataMin, dataMax];
+          return [dataMin, Math.max(dataMax ?? plannedSteps, plannedSteps)];
+        },
+      },
+    };
     const axes: uPlot.Axis[] = [
       {
         stroke: 'rgba(255,255,255,0.55)',
@@ -397,7 +419,19 @@ export default function JobLossGraph({ job }: Props) {
     }
 
     return { data: data as uPlot.AlignedData, seriesConfigs, scales, axes, yClip, sparseFlags };
-  }, [series, activeKeys, colorByKey, smoothing, plotStride, windowSize, useLogScale, showTrend, clipOutliers]);
+  }, [
+    series,
+    activeKeys,
+    colorByKey,
+    smoothing,
+    plotStride,
+    windowSize,
+    useLogScale,
+    showTrend,
+    showFullRun,
+    plannedSteps,
+    clipOutliers,
+  ]);
 
   // Layout wrapper we measure for sizing — uPlot collapses its own mount node
   // to width:min-content, so we can't read sizes off it.
@@ -424,8 +458,9 @@ export default function JobLossGraph({ job }: Props) {
   // configs, which setData alone won't refresh.
   const sparseKey = built.sparseFlags.map(s => (s ? 1 : 0)).join('');
   const structuralKey = useMemo(
-    () => `${activeKeys.join('|')}|trend=${showTrend}|log=${useLogScale}|has=${hasData}|sparse=${sparseKey}`,
-    [activeKeys, showTrend, useLogScale, hasData, sparseKey],
+    () =>
+      `${activeKeys.join('|')}|trend=${showTrend}|log=${useLogScale}|full=${showFullRun ? plannedSteps : 0}|has=${hasData}|sparse=${sparseKey}`,
+    [activeKeys, showTrend, useLogScale, showFullRun, plannedSteps, hasData, sparseKey],
   );
 
   useEffect(() => {
@@ -458,7 +493,9 @@ export default function JobLossGraph({ job }: Props) {
             const xs = u.data[0] as number[];
             if (!xs || !xs.length) return;
             const sx = u.scales.x;
-            const zoomed = sx.min !== xs[0] || sx.max !== xs[xs.length - 1];
+            const defaultMax =
+              showFullRun && plannedSteps > 0 ? Math.max(xs[xs.length - 1], plannedSteps) : xs[xs.length - 1];
+            const zoomed = sx.min !== xs[0] || sx.max !== defaultMax;
             setIsZoomed(zoomed);
           },
         ],
@@ -526,8 +563,9 @@ export default function JobLossGraph({ job }: Props) {
     if (!u) return;
     const xs = u.data[0] as number[];
     if (!xs || !xs.length) return;
-    u.setScale('x', { min: xs[0], max: xs[xs.length - 1] });
-  }, []);
+    const max = showFullRun && plannedSteps > 0 ? Math.max(xs[xs.length - 1], plannedSteps) : xs[xs.length - 1];
+    u.setScale('x', { min: xs[0], max });
+  }, [showFullRun, plannedSteps]);
 
   const totalPoints = built.data[0]?.length ?? 0;
 
@@ -593,6 +631,13 @@ export default function JobLossGraph({ job }: Props) {
               <ToggleButton checked={showTrend} onClick={() => setShowTrend(v => !v)} label="Trend" />
               <ToggleButton checked={useLogScale} onClick={() => setUseLogScale(v => !v)} label="Log Y" />
               <ToggleButton checked={clipOutliers} onClick={() => setClipOutliers(v => !v)} label="Clip outliers" />
+              {plannedSteps > 0 && (
+                <ToggleButton
+                  checked={showFullRun}
+                  onClick={() => setShowFullRun(v => !v)}
+                  label={`Full run (${plannedSteps.toLocaleString()})`}
+                />
+              )}
             </div>
           </div>
 

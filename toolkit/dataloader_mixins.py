@@ -833,6 +833,8 @@ class ImageProcessingDTOMixin:
 
             if self.has_mask_image:
                 self.load_mask_image()
+            if self.has_character_dop_visual_mask:
+                self.load_character_dop_visual_mask()
             
             # Only log success in debug mode
             if hasattr(self.dataset_config, 'debug') and self.dataset_config.debug:
@@ -900,6 +902,8 @@ class ImageProcessingDTOMixin:
                     self.load_clip_image()
                 if self.has_mask_image:
                     self.load_mask_image()
+                if self.has_character_dop_visual_mask:
+                    self.load_character_dop_visual_mask()
                 if self.has_unconditional:
                     self.load_unconditional_image()
                 return
@@ -1003,6 +1007,8 @@ class ImageProcessingDTOMixin:
                 self.load_clip_image()
             if self.has_mask_image:
                 self.load_mask_image()
+            if self.has_character_dop_visual_mask:
+                self.load_character_dop_visual_mask()
             if self.has_unconditional:
                 self.load_unconditional_image()
 
@@ -1562,6 +1568,9 @@ class MaskFileItemDTOMixin:
         self.has_mask_image = False
         self.mask_path: Union[str, None] = None
         self.mask_tensor: Union[torch.Tensor, None] = None
+        self.has_character_dop_visual_mask = False
+        self.character_dop_visual_mask_path: Union[str, None] = None
+        self.character_dop_visual_mask_tensor: Union[torch.Tensor, None] = None
         self.character_dop_audio_intervals = None
         self.use_alpha_as_mask: bool = False
         dataset_config: 'DatasetConfig' = kwargs.get('dataset_config', None)
@@ -1593,31 +1602,50 @@ class MaskFileItemDTOMixin:
             if matching_mask is not None:
                 self.mask_path = str(matching_mask)
                 self.has_mask_image = True
+        character_mask_root = getattr(dataset_config, 'character_dop_visual_mask_path', None)
+        if character_mask_root is not None:
+            img_path = kwargs.get('path', None)
+            matching_mask = find_matching_character_visual_mask(
+                media_path=Path(img_path),
+                mask_root=Path(character_mask_root),
+                dataset_dir=Path(dataset_config.folder_path or os.path.dirname(img_path)),
+                is_video=self.is_video,
+            )
+            if matching_mask is not None:
+                self.character_dop_visual_mask_path = str(matching_mask)
+                self.has_character_dop_visual_mask = True
 
-    def load_mask_image(self: 'FileItemDTO'):
-        if os.path.splitext(self.mask_path)[1].lower() == '.npy':
-            source_mask = torch.from_numpy(np.load(self.mask_path))
+    def _load_mask_tensor_from_path(
+        self: 'FileItemDTO',
+        mask_path: str,
+        *,
+        use_alpha: bool,
+        invert: bool,
+        min_value: float,
+        blur: bool,
+    ) -> torch.Tensor:
+        if os.path.splitext(mask_path)[1].lower() == '.npy':
+            source_mask = torch.from_numpy(np.load(mask_path))
             frame_indices = getattr(self, 'video_frames_to_extract', None)
-            self.mask_tensor = prepare_temporal_character_mask(
+            mask_tensor = prepare_temporal_character_mask(
                 source_mask,
                 frame_indices=frame_indices,
                 scale_size=(self.scale_to_width, self.scale_to_height),
                 crop=(self.crop_x, self.crop_y, self.crop_width, self.crop_height),
                 flip_x=self.flip_x,
                 flip_y=self.flip_y,
-                min_value=self.mask_min_value,
+                min_value=min_value,
             )
-            if self.dataset_config.invert_mask:
-                self.mask_tensor = 1.0 - self.mask_tensor
-            return
+            return 1.0 - mask_tensor if invert else mask_tensor
         try:
-            img = Image.open(self.mask_path)
+            img = Image.open(mask_path)
             img = exif_transpose(img)
         except Exception as e:
             print_acc(f"Error: {e}")
-            print_acc(f"Error loading image: {self.mask_path}")
+            print_acc(f"Error loading image: {mask_path}")
+            raise
 
-        if self.use_alpha_as_mask:
+        if use_alpha:
             # pipeline expectws an rgb image so we need to put alpha in all channels
             np_img = np.array(img)
             np_img[:, :, :3] = np_img[:, :, 3:]
@@ -1626,7 +1654,7 @@ class MaskFileItemDTOMixin:
             img = Image.fromarray(np_img)
 
         img = img.convert('RGB')
-        if self.dataset_config.invert_mask:
+        if invert:
             img = ImageOps.invert(img)
         w, h = img.size
         fix_size = False
@@ -1655,10 +1683,11 @@ class MaskFileItemDTOMixin:
             # do a flip
             img = img.transpose(Image.FLIP_TOP_BOTTOM)
 
-        # randomly apply a blur up to 0.5% of the size of the min (width, height)
-        min_size = min(img.width, img.height)
-        blur_radius = int(min_size * random.random() * 0.005)
-        img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        if blur:
+            # randomly apply a blur up to 0.5% of the size of the min (width, height)
+            min_size = min(img.width, img.height)
+            blur_radius = int(min_size * random.random() * 0.005)
+            img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
 
         # make grayscale
         img = img.convert('L')
@@ -1681,14 +1710,32 @@ class MaskFileItemDTOMixin:
             transforms.ToTensor(),
         ])
         if self.aug_replay_spatial_transforms:
-            self.mask_tensor = self.augment_spatial_control(img, transform=transform)
+            mask_tensor = self.augment_spatial_control(img, transform=transform)
         else:
-            self.mask_tensor = transform(img)
-        self.mask_tensor = value_map(self.mask_tensor, 0, 1.0, self.mask_min_value, 1.0)
-        # convert to grayscale
+            mask_tensor = transform(img)
+        return value_map(mask_tensor, 0, 1.0, min_value, 1.0)
+
+    def load_mask_image(self: 'FileItemDTO'):
+        self.mask_tensor = self._load_mask_tensor_from_path(
+            self.mask_path,
+            use_alpha=self.use_alpha_as_mask,
+            invert=self.dataset_config.invert_mask,
+            min_value=self.mask_min_value,
+            blur=True,
+        )
+
+    def load_character_dop_visual_mask(self: 'FileItemDTO'):
+        self.character_dop_visual_mask_tensor = self._load_mask_tensor_from_path(
+            self.character_dop_visual_mask_path,
+            use_alpha=False,
+            invert=False,
+            min_value=0.0,
+            blur=False,
+        )
 
     def cleanup_mask(self: 'FileItemDTO'):
         self.mask_tensor = None
+        self.character_dop_visual_mask_tensor = None
 
 
 class UnconditionalFileItemDTOMixin:

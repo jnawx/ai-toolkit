@@ -157,6 +157,40 @@ def character_dop_multiplier(*, base_multiplier: float, every_n_steps: int) -> f
     return float(base_multiplier) * every_n_steps
 
 
+def _presence_tensor(
+    presence: Optional[Sequence[bool]],
+    *,
+    batch_size: int,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    if presence is None:
+        return None
+    presence_tensor = torch.as_tensor(presence, device=device, dtype=torch.bool).flatten()
+    if presence_tensor.numel() != batch_size:
+        raise ValueError(
+            f"character annotation presence needs {batch_size} values, "
+            f"got {presence_tensor.numel()}"
+        )
+    return presence_tensor
+
+
+def _select_per_sample_prediction(
+    *,
+    primary: torch.Tensor,
+    fallback: torch.Tensor,
+    annotation_present: Optional[Sequence[bool]],
+) -> torch.Tensor:
+    presence = _presence_tensor(
+        annotation_present,
+        batch_size=primary.shape[0],
+        device=primary.device,
+    )
+    if presence is None:
+        return primary
+    selection_shape = (primary.shape[0],) + (1,) * (primary.ndim - 1)
+    return torch.where(presence.view(selection_shape), primary, fallback)
+
+
 def _visual_preservation_weights(
     character_mask: torch.Tensor,
     token_error: torch.Tensor,
@@ -259,6 +293,7 @@ def character_dop_loss(
     modality: CharacterDOPModality,
     focus_fraction: float,
     character_mask: Optional[torch.Tensor] = None,
+    character_mask_present: Optional[Sequence[bool]] = None,
 ) -> torch.Tensor:
     """Preserve the base model where a character LoRA drifts most.
 
@@ -301,6 +336,20 @@ def character_dop_loss(
     else:
         raise ValueError(f"unsupported character DOP modality: {modality}")
 
+    if weights is not None:
+        presence = _presence_tensor(
+            character_mask_present,
+            batch_size=token_error.shape[0],
+            device=token_error.device,
+        )
+        if presence is not None:
+            presence_shape = (token_error.shape[0],) + (1,) * (token_error.ndim - 1)
+            weights = torch.where(
+                presence.view(presence_shape),
+                weights,
+                torch.ones_like(weights),
+            )
+
     return _focused_token_mean(token_error, focus_fraction, weights)
 
 
@@ -313,6 +362,8 @@ def character_dop_losses(
     audio_primary_prediction: Optional[torch.Tensor] = None,
     audio_prior: Optional[torch.Tensor] = None,
     audio_character_intervals: Optional[AudioIntervals] = None,
+    visual_character_mask_present: Optional[Sequence[bool]] = None,
+    audio_character_mask_present: Optional[Sequence[bool]] = None,
     audio_latents_per_second: int = 40,
     focus_fraction: float,
     base_multiplier: float,
@@ -343,7 +394,11 @@ def character_dop_losses(
     visual_loss = None
     if visual_prediction is not None:
         visual_prediction_to_preserve = (
-            visual_primary_prediction
+            _select_per_sample_prediction(
+                primary=visual_primary_prediction,
+                fallback=visual_prediction,
+                annotation_present=visual_character_mask_present,
+            )
             if character_mask is not None and visual_primary_prediction is not None
             else visual_prediction
         )
@@ -353,6 +408,7 @@ def character_dop_losses(
             modality="visual",
             focus_fraction=focus_fraction,
             character_mask=character_mask,
+            character_mask_present=visual_character_mask_present,
         ) * scale * visual_multiplier
 
     audio_loss = None
@@ -360,7 +416,11 @@ def character_dop_losses(
         audio_character_mask = None
         audio_prediction_to_preserve = audio_prediction
         if audio_character_intervals is not None and audio_primary_prediction is not None:
-            audio_prediction_to_preserve = audio_primary_prediction
+            audio_prediction_to_preserve = _select_per_sample_prediction(
+                primary=audio_primary_prediction,
+                fallback=audio_prediction,
+                annotation_present=audio_character_mask_present,
+            )
             audio_character_mask = audio_character_mask_from_intervals(
                 audio_prediction_to_preserve,
                 audio_character_intervals,
@@ -372,6 +432,7 @@ def character_dop_losses(
             modality="audio",
             focus_fraction=focus_fraction,
             character_mask=audio_character_mask,
+            character_mask_present=audio_character_mask_present,
         ) * scale * audio_multiplier
 
     if visual_loss is None:

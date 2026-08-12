@@ -299,6 +299,16 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'datasets.character_dop_visual_mask_path': {
+    title: 'Character Visual Masks',
+    description: (
+      <>
+        Optional folder of positive character masks for MiniMax-H3 Character LoRA DOP. Image masks use matching image
+        files; video masks use matching THW NumPy files. These masks affect only preservation outside the target
+        character and never replace the dataset&apos;s ordinary training-loss mask.
+      </>
+    ),
+  },
   'train.diff_output_preservation_character': {
     title: 'Character LoRA DOP',
     description: (
@@ -306,9 +316,9 @@ const docs: { [key: string]: ConfigDoc } = {
         Character LoRA DOP is a counterfactual preservation mode intended to keep a learned character identity and voice
         bound to its trigger. It preserves the largest visual and audio changes made by the LoRA when the trigger is
         replaced by the preservation class. On MiniMax H3, video and soundtrack predictions are preserved separately.
-        If a dataset mask is supplied, it must mark the trained character. The trigger-conditioned prediction is then
+        If a Character DOP visual mask is supplied, it must mark the trained character. The trigger-conditioned prediction is then
         constrained to match the base model outside that mask, directly allowing character changes inside the mask while
-        protecting other people and the scene. A matching THW .npy file in mask_path supplies moving per-frame masks for
+        protecting other people and the scene. A matching THW .npy file in character_dop_visual_mask_path supplies moving per-frame masks for
         videos; a normal image mask is repeated across frames. Without masks, the mode instead uses the largest
         counterfactual drifts as a heuristic. Character-speaking JSON sidecars provide the equivalent direct constraint
         for H3 audio. Without them, audio preservation keeps the LoRA close to the base model when the character trigger

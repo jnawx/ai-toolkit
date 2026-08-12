@@ -1405,6 +1405,22 @@ export default function SimpleJob({
                           )}
                         {jobConfig.config.process[0].model.arch === 'minimax_h3' &&
                           jobConfig.config.process[0].train.diff_output_preservation_mode === 'character' &&
+                          !isAudioOnlyDataset(dataset) && (
+                            <TextInput
+                              label="External Character Masks (optional)"
+                              value={dataset.character_dop_visual_mask_path ?? ''}
+                              onChange={value =>
+                                setJobConfig(
+                                  value || null,
+                                  `config.process[0].datasets[${i}].character_dop_visual_mask_path`,
+                                )
+                              }
+                              placeholder="/path/to/visual/masks"
+                              docKey="datasets.character_dop_visual_mask_path"
+                            />
+                          )}
+                        {jobConfig.config.process[0].model.arch === 'minimax_h3' &&
+                          jobConfig.config.process[0].train.diff_output_preservation_mode === 'character' &&
                           (dataset.do_audio || isAudioOnlyDataset(dataset)) && (
                             <TextInput
                               label="External Speaking Masks (optional)"

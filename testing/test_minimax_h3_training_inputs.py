@@ -46,6 +46,8 @@ class _Batch:
         self.audio_pred_prior = None
         self.audio_pred_preservation = None
         self.mask_tensor = None
+        self.character_dop_visual_mask_tensor = None
+        self.character_dop_visual_mask_present = None
         self.file_items = [
             types.SimpleNamespace(
                 character_dop_audio_intervals=None,
@@ -94,7 +96,8 @@ class MiniMaxH3CharacterDOPRoutingTests(unittest.TestCase):
         batch.audio_pred = torch.full((1, 4, 1), 3.0)
         batch.audio_pred_prior = torch.zeros((1, 4, 1))
         batch.audio_pred_preservation = torch.ones((1, 4, 1))
-        batch.mask_tensor = torch.ones((1, 1, 1, 1))
+        batch.character_dop_visual_mask_tensor = torch.ones((1, 1, 1, 1))
+        batch.character_dop_visual_mask_present = [True]
         batch.file_items[0].character_dop_audio_intervals = [(11.0, 13.0)]
         batch.file_items[0].audio_segment = AudioSegment(10.0, 10.0, 5.0)
         primary = torch.full((1, 1, 1, 1, 1), 4.0)
@@ -110,6 +113,9 @@ class MiniMaxH3CharacterDOPRoutingTests(unittest.TestCase):
 
         self.assertIs(inputs["visual_primary_prediction"], primary)
         self.assertIs(inputs["audio_primary_prediction"], batch.audio_pred)
+        self.assertIs(inputs["character_mask"], batch.character_dop_visual_mask_tensor)
+        self.assertEqual(inputs["visual_character_mask_present"], [True])
+        self.assertEqual(inputs["audio_character_mask_present"], [True])
         self.assertEqual(inputs["audio_character_intervals"], [[(0.5, 1.5)]])
         self.assertEqual(inputs["audio_latents_per_second"], 40)
 

@@ -19,13 +19,26 @@ const isWithin = (root: string, target: string) => target === root || target.sta
 
 async function resolveDatasetMedia(datasetName: unknown, rawMediaPath: unknown) {
   if (typeof datasetName !== 'string' || !datasetName.trim() || typeof rawMediaPath !== 'string') return null;
-  const datasetsRoot = path.resolve(await getDatasetsRoot());
-  const datasetDir = path.resolve(datasetsRoot, datasetName);
-  const mediaPath = path.resolve(rawMediaPath);
-  if (!isWithin(datasetsRoot, datasetDir) || !isWithin(datasetDir, mediaPath)) return null;
-  const stat = await fs.promises.stat(mediaPath).catch(() => null);
-  if (!stat?.isFile()) return null;
-  return { datasetDir, mediaPath };
+  const lexicalRoot = path.resolve(await getDatasetsRoot());
+  const lexicalDataset = path.resolve(lexicalRoot, datasetName);
+  const lexicalMedia = path.resolve(rawMediaPath);
+  if (!isWithin(lexicalRoot, lexicalDataset) || !isWithin(lexicalDataset, lexicalMedia)) return null;
+  try {
+    const [datasetsRoot, datasetDir, mediaPath] = await Promise.all([
+      fs.promises.realpath(lexicalRoot),
+      fs.promises.realpath(lexicalDataset),
+      fs.promises.realpath(lexicalMedia),
+    ]);
+    if (!isWithin(datasetsRoot, datasetDir) || !isWithin(datasetDir, mediaPath)) return null;
+    const [datasetStat, mediaStat] = await Promise.all([
+      fs.promises.stat(datasetDir),
+      fs.promises.stat(mediaPath),
+    ]);
+    if (!datasetStat.isDirectory() || !mediaStat.isFile()) return null;
+    return { datasetDir, mediaPath };
+  } catch {
+    return null;
+  }
 }
 
 function parseLastJson(stdout: string): unknown {

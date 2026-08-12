@@ -37,8 +37,8 @@ class CharacterAnnotationPaths:
 
 
 def _resolved_media(dataset_dir: Path, media_path: Path) -> tuple[Path, Path]:
-    dataset_dir = Path(dataset_dir).resolve()
-    media_path = Path(media_path).resolve()
+    dataset_dir = Path(dataset_dir).resolve(strict=True)
+    media_path = Path(media_path).resolve(strict=True)
     try:
         relative_media = media_path.relative_to(dataset_dir)
     except ValueError as exc:

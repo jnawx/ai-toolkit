@@ -227,6 +227,27 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
             is_character_annotation_artifact(dataset_dir / "portrait.png", dataset_dir)
         )
 
+    def test_annotation_storage_rejects_symlink_escape_from_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            dataset_dir = root / "dataset"
+            outside_dir = root / "outside"
+            dataset_dir.mkdir()
+            outside_dir.mkdir()
+            outside_media = outside_dir / "scene.mp4"
+            outside_media.touch()
+            link = dataset_dir / "linked.mp4"
+            try:
+                link.symlink_to(outside_media)
+            except OSError:
+                self.skipTest("symlinks are unavailable on this platform")
+
+            with self.assertRaisesRegex(ValueError, "inside the dataset"):
+                get_character_annotation_paths(
+                    dataset_dir=dataset_dir,
+                    media_path=link,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

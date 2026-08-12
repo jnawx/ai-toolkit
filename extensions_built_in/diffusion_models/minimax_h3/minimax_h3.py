@@ -936,7 +936,11 @@ class MinimaxH3Model(BaseModel):
             getattr(file_item, "character_dop_audio_intervals", None)
             for file_item in batch.file_items
         ]
+        audio_character_mask_present = None
         if any(intervals is not None for intervals in raw_audio_intervals):
+            audio_character_mask_present = [
+                intervals is not None for intervals in raw_audio_intervals
+            ]
             audio_character_intervals = []
             for file_item, intervals in zip(batch.file_items, raw_audio_intervals):
                 if intervals is None:
@@ -969,8 +973,14 @@ class MinimaxH3Model(BaseModel):
             ),
             "audio_prior": prior_prediction if is_audio_only else batch.audio_pred_prior,
             "audio_character_intervals": audio_character_intervals,
+            "audio_character_mask_present": audio_character_mask_present,
             "audio_latents_per_second": packing.AUDIO_LATENTS_PER_SECOND,
-            "character_mask": None if is_audio_only else batch.mask_tensor,
+            "character_mask": (
+                None if is_audio_only else batch.character_dop_visual_mask_tensor
+            ),
+            "visual_character_mask_present": (
+                None if is_audio_only else batch.character_dop_visual_mask_present
+            ),
         }
 
     def get_noise_prediction(

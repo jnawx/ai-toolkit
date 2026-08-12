@@ -1,6 +1,7 @@
 import unittest
 import json
 import tempfile
+import types
 from pathlib import Path
 
 import torch
@@ -20,9 +21,52 @@ from toolkit.config_modules import (
     TrainConfig,
     validate_configs,
 )
+from toolkit.data_transfer_object.data_loader import DataLoaderBatchDTO
 
 
 class CharacterDOPVisualLossTests(unittest.TestCase):
+    def test_character_masks_collate_separately_from_ordinary_loss_masks(self):
+        dataset_config = types.SimpleNamespace(
+            load_image_when_caching_latents=False,
+            cache_tensors_to_disk=False,
+        )
+
+        def item(character_mask):
+            return types.SimpleNamespace(
+                is_latent_cached=False,
+                is_audio_only=False,
+                dataset_config=dataset_config,
+                extra_values=[],
+                audio_data=None,
+                audio_tensor=None,
+                num_frames=1,
+                tensor=torch.zeros((1, 1, 1)),
+                control_tensor=None,
+                control_tensor_list=None,
+                inpaint_tensor=None,
+                loss_multiplier=1.0,
+                clip_image_tensor=None,
+                mask_tensor=None,
+                character_dop_visual_mask_tensor=character_mask,
+                unaugmented_tensor=None,
+                unconditional_tensor=None,
+                clip_image_embeds=None,
+                clip_image_embeds_unconditional=None,
+                prompt_embeds=None,
+                dop_prompt_embeds=None,
+            )
+
+        batch = DataLoaderBatchDTO(
+            file_items=[item(torch.ones((1, 1, 1))), item(None)]
+        )
+
+        self.assertIsNone(batch.mask_tensor)
+        self.assertEqual(batch.character_dop_visual_mask_present, [True, False])
+        torch.testing.assert_close(
+            batch.character_dop_visual_mask_tensor,
+            torch.tensor([[[[1.0]]], [[[0.0]]]]),
+        )
+
     def test_visual_loss_focuses_on_the_largest_token_drift(self):
         prior = torch.zeros((1, 1, 1, 2, 2), dtype=torch.float32)
         prediction = torch.tensor(
@@ -71,6 +115,27 @@ class CharacterDOPVisualLossTests(unittest.TestCase):
 
         self.assertIsNotNone(prediction.grad)
         self.assertGreater(prediction.grad.abs().sum().item(), 0.0)
+
+    def test_mixed_visual_batch_uses_counterfactual_fallback_for_unannotated_items(self):
+        prior = torch.zeros((2, 1, 1, 1), dtype=torch.float32)
+        primary = torch.tensor([[[[10.0]]], [[[20.0]]]])
+        counterfactual = torch.tensor([[[[2.0]]], [[[3.0]]]])
+        character_mask = torch.tensor([[[[1.0]]], [[[0.0]]]])
+
+        losses = character_dop_losses(
+            visual_prediction=counterfactual,
+            visual_primary_prediction=primary,
+            visual_prior=prior,
+            visual_character_mask_present=[True, False],
+            character_mask=character_mask,
+            focus_fraction=1.0,
+            base_multiplier=1.0,
+            every_n_steps=1,
+            visual_multiplier=1.0,
+            audio_multiplier=1.0,
+        )
+
+        self.assertEqual(losses.visual.item(), 4.5)
 
     def test_temporal_masks_select_the_same_source_frames_as_the_video(self):
         source_mask = torch.tensor(
@@ -126,6 +191,27 @@ class CharacterDOPAudioLossTests(unittest.TestCase):
         )
 
         self.assertEqual(loss.item(), 12.5)
+
+    def test_mixed_audio_batch_uses_counterfactual_fallback_for_unannotated_items(self):
+        prior = torch.zeros((2, 2, 1), dtype=torch.float32)
+        primary = torch.tensor([[[10.0], [10.0]], [[20.0], [20.0]]])
+        counterfactual = torch.tensor([[[2.0], [2.0]], [[3.0], [3.0]]])
+
+        losses = character_dop_losses(
+            audio_prediction=counterfactual,
+            audio_primary_prediction=primary,
+            audio_prior=prior,
+            audio_character_intervals=[[(0.0, 1.0)], []],
+            audio_character_mask_present=[True, False],
+            audio_latents_per_second=1,
+            focus_fraction=1.0,
+            base_multiplier=1.0,
+            every_n_steps=1,
+            visual_multiplier=1.0,
+            audio_multiplier=1.0,
+        )
+
+        self.assertEqual(losses.audio.item(), 4.5)
 
     def test_audio_intervals_load_from_a_matching_json_sidecar(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -317,7 +403,8 @@ class CharacterDOPConfigTests(unittest.TestCase):
 
             validate_configs(train, model, SaveConfig(), [dataset])
 
-            self.assertEqual(dataset.mask_path, str(visual_dir))
+            self.assertIsNone(dataset.mask_path)
+            self.assertEqual(dataset.character_dop_visual_mask_path, str(visual_dir))
             self.assertEqual(dataset.character_dop_audio_mask_path, str(audio_dir))
 
 

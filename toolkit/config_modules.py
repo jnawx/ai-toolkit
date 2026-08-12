@@ -1038,6 +1038,9 @@ class DatasetConfig:
         self.character_dop_audio_mask_path: str = kwargs.get(
             'character_dop_audio_mask_path', None
         )
+        self.character_dop_visual_mask_path: str = kwargs.get(
+            'character_dop_visual_mask_path', None
+        )
         # The dataset editor stores Character DOP annotations in a conventional
         # hidden folder beside the media. Explicit mask paths still win.
         self.character_dop_use_dataset_annotations: bool = kwargs.get(
@@ -1557,10 +1560,10 @@ def validate_configs(
             audio_path = os.path.join(annotation_root, 'audio')
             if (
                 not dataset.is_audio_only
-                and dataset.mask_path is None
+                and dataset.character_dop_visual_mask_path is None
                 and os.path.isdir(visual_path)
             ):
-                dataset.mask_path = visual_path
+                dataset.character_dop_visual_mask_path = visual_path
             if (
                 (dataset.do_audio or dataset.is_audio_only)
                 and dataset.character_dop_audio_mask_path is None
@@ -1576,6 +1579,15 @@ def validate_configs(
             if not (dataset.do_audio or dataset.is_audio_only):
                 raise ValueError(
                     "character_dop_audio_mask_path requires an audio-enabled dataset"
+                )
+        if dataset.character_dop_visual_mask_path is not None:
+            if train_config.diff_output_preservation_mode != 'character':
+                raise ValueError(
+                    "character_dop_visual_mask_path requires character DOP mode"
+                )
+            if dataset.is_audio_only:
+                raise ValueError(
+                    "character_dop_visual_mask_path cannot be used with an audio-only dataset"
                 )
 
     audio_only_datasets = [dataset for dataset in dataset_configs if dataset.is_audio_only]

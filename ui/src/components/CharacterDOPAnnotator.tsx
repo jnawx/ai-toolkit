@@ -10,6 +10,7 @@ import { isAudio, isVideo } from '@/utils/basic';
 type CharacterPoint = { x: number; y: number; label: 0 | 1 };
 type CharacterPrompt = { time_seconds: number; points: CharacterPoint[] };
 type SpeakingInterval = [number, number];
+const MAX_WAVEFORM_SOURCE_BYTES = 32 * 1024 * 1024;
 
 type AnnotationState = {
   root: string;
@@ -198,9 +199,19 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     if (!open || !hasTimeline) return;
     let cancelled = false;
     let context: AudioContext | null = null;
-    fetch(mediaSrc)
-      .then(response => response.arrayBuffer())
+    const controller = new AbortController();
+    fetch(mediaSrc, { signal: controller.signal })
+      .then(response => {
+        if (!response.ok) throw new Error(`Waveform source returned ${response.status}`);
+        const contentLength = Number(response.headers.get('content-length') || 0);
+        if (!contentLength || contentLength > MAX_WAVEFORM_SOURCE_BYTES) {
+          void response.body?.cancel();
+          return null;
+        }
+        return response.arrayBuffer();
+      })
       .then(async bytes => {
+        if (bytes == null) return;
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         if (!AudioContextClass) return;
         context = new AudioContextClass();
@@ -220,6 +231,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       .finally(() => context?.close());
     return () => {
       cancelled = true;
+      controller.abort();
       void context?.close();
     };
   }, [open, hasTimeline, mediaSrc]);

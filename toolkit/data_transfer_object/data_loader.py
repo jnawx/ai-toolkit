@@ -252,6 +252,8 @@ class DataLoaderBatchDTO:
             self.control_tensor_list: Union[List[List[torch.Tensor]], None] = None
             self.clip_image_tensor: Union[torch.Tensor, None] = None
             self.mask_tensor: Union[torch.Tensor, None] = None
+            self.character_dop_visual_mask_tensor: Union[torch.Tensor, None] = None
+            self.character_dop_visual_mask_present: Union[List[bool], None] = None
             self.unaugmented_tensor: Union[torch.Tensor, None] = None
             self.unconditional_tensor: Union[torch.Tensor, None] = None
             self.unconditional_latents: Union[torch.Tensor, None] = None
@@ -451,6 +453,26 @@ class DataLoaderBatchDTO:
                     else:
                         mask_tensors.append(x.mask_tensor)
                 self.mask_tensor = torch.cat([x.unsqueeze(0) for x in mask_tensors])
+
+            if any([x.character_dop_visual_mask_tensor is not None for x in self.file_items]):
+                base_character_mask = next(
+                    x.character_dop_visual_mask_tensor
+                    for x in self.file_items
+                    if x.character_dop_visual_mask_tensor is not None
+                )
+                self.character_dop_visual_mask_present = [
+                    x.character_dop_visual_mask_tensor is not None
+                    for x in self.file_items
+                ]
+                character_masks = [
+                    x.character_dop_visual_mask_tensor
+                    if x.character_dop_visual_mask_tensor is not None
+                    else torch.zeros_like(base_character_mask)
+                    for x in self.file_items
+                ]
+                self.character_dop_visual_mask_tensor = torch.cat(
+                    [mask.unsqueeze(0) for mask in character_masks]
+                )
 
             # add unaugmented tensors for ones with augments
             if any([x.unaugmented_tensor is not None for x in self.file_items]):

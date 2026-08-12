@@ -4,6 +4,7 @@ import unittest
 import torch
 
 from extensions_built_in.diffusion_models.minimax_h3.minimax_h3 import MinimaxH3Model
+from toolkit.audio.processing import AudioSegment
 
 
 class _RecordingTransformer:
@@ -41,6 +42,16 @@ class _Batch:
         self.audio_noise = None
         self.audio_target = None
         self.audio_pred_slot = "test_secondary"
+        self.audio_pred = None
+        self.audio_pred_prior = None
+        self.audio_pred_preservation = None
+        self.mask_tensor = None
+        self.file_items = [
+            types.SimpleNamespace(
+                character_dop_audio_intervals=None,
+                audio_segment=None,
+            )
+        ]
 
     def set_secondary_audio_pred(self, _prediction):
         pass
@@ -74,6 +85,53 @@ class MiniMaxH3SharedTrainingInputTests(unittest.TestCase):
         calls = _run_two_h3_predictions(do_i2v=True)
 
         torch.testing.assert_close(calls[0][0], calls[1][0])
+
+
+class MiniMaxH3CharacterDOPRoutingTests(unittest.TestCase):
+    def test_joint_video_audio_routes_primary_predictions_and_speaking_intervals(self):
+        h3 = MinimaxH3Model.__new__(MinimaxH3Model)
+        batch = _Batch()
+        batch.audio_pred = torch.full((1, 4, 1), 3.0)
+        batch.audio_pred_prior = torch.zeros((1, 4, 1))
+        batch.audio_pred_preservation = torch.ones((1, 4, 1))
+        batch.mask_tensor = torch.ones((1, 1, 1, 1))
+        batch.file_items[0].character_dop_audio_intervals = [(11.0, 13.0)]
+        batch.file_items[0].audio_segment = AudioSegment(10.0, 10.0, 5.0)
+        primary = torch.full((1, 1, 1, 1, 1), 4.0)
+        preservation = torch.full_like(primary, 2.0)
+        prior = torch.zeros_like(primary)
+
+        inputs = h3.get_character_dop_inputs(
+            batch=batch,
+            primary_prediction=primary,
+            preservation_prediction=preservation,
+            prior_prediction=prior,
+        )
+
+        self.assertIs(inputs["visual_primary_prediction"], primary)
+        self.assertIs(inputs["audio_primary_prediction"], batch.audio_pred)
+        self.assertEqual(inputs["audio_character_intervals"], [[(0.5, 1.5)]])
+        self.assertEqual(inputs["audio_latents_per_second"], 40)
+
+    def test_audio_only_routes_the_main_h3_predictions_as_audio(self):
+        h3 = MinimaxH3Model.__new__(MinimaxH3Model)
+        batch = _Batch()
+        batch.dataset_config.is_audio_only = True
+        primary = torch.full((1, 4, 1), 4.0)
+        preservation = torch.full_like(primary, 2.0)
+        prior = torch.zeros_like(primary)
+
+        inputs = h3.get_character_dop_inputs(
+            batch=batch,
+            primary_prediction=primary,
+            preservation_prediction=preservation,
+            prior_prediction=prior,
+        )
+
+        self.assertIsNone(inputs["visual_prediction"])
+        self.assertIs(inputs["audio_prediction"], preservation)
+        self.assertIs(inputs["audio_primary_prediction"], primary)
+        self.assertIs(inputs["audio_prior"], prior)
 
 
 if __name__ == "__main__":

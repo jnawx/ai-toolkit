@@ -41,6 +41,10 @@ from toolkit.prompt_utils import PromptEmbeds
 from torchvision.transforms import functional as TF
 
 from toolkit.train_tools import get_torch_dtype
+from toolkit.character_dop import (
+    load_character_audio_intervals,
+    prepare_temporal_character_mask,
+)
 
 if TYPE_CHECKING:
     from toolkit.data_loader import AiToolkitDataset
@@ -589,6 +593,7 @@ class ImageProcessingDTOMixin:
                     
             # Final safety check - ensure no frame exceeds max valid index
             frames_to_extract = [min(frame_idx, max_frame_index) for frame_idx in frames_to_extract]
+            self.video_frames_to_extract = frames_to_extract
             
             # Only log frames to extract if in debug mode
             if hasattr(self.dataset_config, 'debug') and self.dataset_config.debug:
@@ -746,6 +751,11 @@ class ImageProcessingDTOMixin:
                         target_duration = float(self.num_frames) / float(self.dataset_config.fps)
                     else:
                         target_duration = source_duration
+                    self.audio_segment = AudioSegment(
+                        start_seconds=clip_start_time,
+                        duration_seconds=source_duration,
+                        target_duration_seconds=target_duration,
+                    )
 
                     # torchcodec's AudioDecoder raises when a video has no audio
                     # track, so probe for a stream before decoding.
@@ -818,6 +828,9 @@ class ImageProcessingDTOMixin:
                 except Exception as e:
                     # if issue with libtorchcodec "Could not load libtorchcodec"
                     raise Exception(f"** WARNING ** - Error Processing audio for {self.path}. Error: {e}")
+
+            if self.has_mask_image:
+                self.load_mask_image()
             
             # Only log success in debug mode
             if hasattr(self.dataset_config, 'debug') and self.dataset_config.debug:
@@ -1547,9 +1560,18 @@ class MaskFileItemDTOMixin:
         self.has_mask_image = False
         self.mask_path: Union[str, None] = None
         self.mask_tensor: Union[torch.Tensor, None] = None
+        self.character_dop_audio_intervals = None
         self.use_alpha_as_mask: bool = False
         dataset_config: 'DatasetConfig' = kwargs.get('dataset_config', None)
         self.mask_min_value = dataset_config.mask_min_value
+        if (
+            dataset_config.character_dop_audio_mask_path is not None
+            and (dataset_config.do_audio or self.is_audio_only)
+        ):
+            self.character_dop_audio_intervals = load_character_audio_intervals(
+                media_path=kwargs.get('path', None),
+                intervals_path=dataset_config.character_dop_audio_mask_path,
+            )
         if dataset_config.alpha_mask:
             self.use_alpha_as_mask = True
             self.mask_path = kwargs.get('path', None)
@@ -1560,13 +1582,28 @@ class MaskFileItemDTOMixin:
             # we are using control images
             img_path = kwargs.get('path', None)
             file_name_no_ext = os.path.splitext(os.path.basename(img_path))[0]
-            for ext in img_ext_list:
+            mask_extensions = img_ext_list + (['.npy'] if self.is_video else [])
+            for ext in mask_extensions:
                 if os.path.exists(os.path.join(mask_path, file_name_no_ext + ext)):
                     self.mask_path = os.path.join(mask_path, file_name_no_ext + ext)
                     self.has_mask_image = True
                     break
 
     def load_mask_image(self: 'FileItemDTO'):
+        if os.path.splitext(self.mask_path)[1].lower() == '.npy':
+            source_mask = torch.from_numpy(np.load(self.mask_path))
+            self.mask_tensor = prepare_temporal_character_mask(
+                source_mask,
+                frame_indices=getattr(self, 'video_frames_to_extract', None),
+                scale_size=(self.scale_to_width, self.scale_to_height),
+                crop=(self.crop_x, self.crop_y, self.crop_width, self.crop_height),
+                flip_x=self.flip_x,
+                flip_y=self.flip_y,
+                min_value=self.mask_min_value,
+            )
+            if self.dataset_config.invert_mask:
+                self.mask_tensor = 1.0 - self.mask_tensor
+            return
         try:
             img = Image.open(self.mask_path)
             img = exif_transpose(img)
@@ -1874,6 +1911,13 @@ class LatentCachingFileItemDTOMixin:
                     self._cached_first_frame_latent = _latent_from_uint8(self._cached_first_frame_latent)
             if 'audio_latent' in state_dict:
                 self._cached_audio_latent = state_dict['audio_latent']
+            if 'audio_segment' in state_dict:
+                audio_segment = state_dict['audio_segment'].to(torch.float64).tolist()
+                self.audio_segment = AudioSegment(
+                    start_seconds=float(audio_segment[0]),
+                    duration_seconds=float(audio_segment[1]),
+                    target_duration_seconds=float(audio_segment[2]),
+                )
             if 'num_frames' in state_dict:
                 self.num_frames = int(state_dict['num_frames'].item())
             if 'tensor' in state_dict:
@@ -2072,6 +2116,15 @@ class LatentCachingMixin:
                 audio_latent = self.sd.encode_audio([file_item.audio_data]).squeeze(0)
                 if to_disk:
                     state_dict['audio_latent'] = audio_latent.clone().detach().cpu()
+                    if file_item.audio_segment is not None:
+                        state_dict['audio_segment'] = torch.tensor(
+                            [
+                                file_item.audio_segment.start_seconds,
+                                file_item.audio_segment.duration_seconds,
+                                file_item.audio_segment.target_duration_seconds,
+                            ],
+                            dtype=torch.float64,
+                        )
 
             if is_video:
                 state_dict['num_frames'] = torch.tensor(file_item.num_frames, dtype=torch.int32)

@@ -1397,6 +1397,22 @@ export default function SimpleJob({
                             docKey="datasets.do_audio"
                           />
                         )}
+                        {jobConfig.config.process[0].model.arch === 'minimax_h3' &&
+                          jobConfig.config.process[0].train.diff_output_preservation_mode === 'character' &&
+                          dataset.do_audio && (
+                            <TextInput
+                              label="Character Speaking Masks"
+                              value={dataset.character_dop_audio_mask_path ?? ''}
+                              onChange={value =>
+                                setJobConfig(
+                                  value || null,
+                                  `config.process[0].datasets[${i}].character_dop_audio_mask_path`,
+                                )
+                              }
+                              placeholder="/path/to/interval/sidecars"
+                              docKey="datasets.character_dop_audio_mask_path"
+                            />
+                          )}
                         {modelArch?.additionalSections?.includes('datasets.audio_normalize') && (
                           <Checkbox
                             label="Audio Normalize"

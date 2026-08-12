@@ -60,6 +60,7 @@ from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
 )
 from toolkit.util.quantize import get_qtype, quantize, quantize_model
+from toolkit.character_dop import map_audio_intervals_to_training_clip
 from optimum.quanto import freeze
 
 from .src import packing
@@ -919,6 +920,58 @@ class MinimaxH3Model(BaseModel):
         )
         # The H3 head predicts clean - noise; ai-toolkit trains noise - clean.
         return -audio_pred
+
+    def get_character_dop_inputs(
+        self,
+        *,
+        batch: "DataLoaderBatchDTO",
+        primary_prediction: torch.Tensor,
+        preservation_prediction: torch.Tensor,
+        prior_prediction: torch.Tensor,
+    ) -> dict:
+        """Route H3's joint predictions into modality-aware character DOP."""
+        is_audio_only = batch.dataset_config.is_audio_only
+        audio_character_intervals = None
+        raw_audio_intervals = [
+            getattr(file_item, "character_dop_audio_intervals", None)
+            for file_item in batch.file_items
+        ]
+        if any(intervals is not None for intervals in raw_audio_intervals):
+            audio_character_intervals = []
+            for file_item, intervals in zip(batch.file_items, raw_audio_intervals):
+                if intervals is None:
+                    audio_character_intervals.append([])
+                    continue
+                segment = getattr(file_item, "audio_segment", None)
+                if segment is None:
+                    raise ValueError(
+                        "Character DOP speaking masks require audio clip timing. "
+                        "Delete and rebuild this item's latent cache."
+                    )
+                audio_character_intervals.append(
+                    map_audio_intervals_to_training_clip(
+                        intervals,
+                        source_start_seconds=segment.start_seconds,
+                        source_duration_seconds=segment.duration_seconds,
+                        target_duration_seconds=segment.target_duration_seconds,
+                    )
+                )
+
+        return {
+            "visual_prediction": None if is_audio_only else preservation_prediction,
+            "visual_primary_prediction": None if is_audio_only else primary_prediction,
+            "visual_prior": None if is_audio_only else prior_prediction,
+            "audio_prediction": (
+                preservation_prediction if is_audio_only else batch.audio_pred_preservation
+            ),
+            "audio_primary_prediction": (
+                primary_prediction if is_audio_only else batch.audio_pred
+            ),
+            "audio_prior": prior_prediction if is_audio_only else batch.audio_pred_prior,
+            "audio_character_intervals": audio_character_intervals,
+            "audio_latents_per_second": packing.AUDIO_LATENTS_PER_SECOND,
+            "character_mask": None if is_audio_only else batch.mask_tensor,
+        }
 
     def get_noise_prediction(
         self,

@@ -574,13 +574,22 @@ class SDTrainer(BaseSDTrainProcess):
                         lat_height = batch.latents.shape[2]
                         lat_width = batch.latents.shape[3]
                     # resize to size of noise_pred
-                    prior_mask = torch.nn.functional.interpolate(prior_mask, size=(lat_height, lat_width), mode='bicubic')
-                    # stack first channel to match channels of noise_pred
-                    prior_mask = torch.cat([prior_mask[:1]] * noise_pred.shape[1], dim=1)
-                    
-                    if len(noise_pred.shape) == 5:
-                        prior_mask = prior_mask.unsqueeze(2)  # add time dimension back for video
-                        prior_mask = prior_mask.repeat(1, 1, noise_pred.shape[2], 1, 1) 
+                    if len(noise_pred.shape) == 5 and prior_mask.ndim == 5:
+                        prior_mask = torch.nn.functional.interpolate(
+                            prior_mask,
+                            size=(noise_pred.shape[2], lat_height, lat_width),
+                            mode='nearest',
+                        )
+                        prior_mask = prior_mask.expand(-1, noise_pred.shape[1], -1, -1, -1)
+                    else:
+                        prior_mask = torch.nn.functional.interpolate(
+                            prior_mask, size=(lat_height, lat_width), mode='bicubic'
+                        )
+                        prior_mask = prior_mask.expand(-1, noise_pred.shape[1], -1, -1)
+
+                        if len(noise_pred.shape) == 5:
+                            prior_mask = prior_mask.unsqueeze(2)  # add time dimension back for video
+                            prior_mask = prior_mask.repeat(1, 1, noise_pred.shape[2], 1, 1)
 
                     prior_mask_multiplier = 1.0 - prior_mask
                     
@@ -933,8 +942,9 @@ class SDTrainer(BaseSDTrainProcess):
         try:
             if len(noise_pred.shape) == 5:
                 # video B,C,T,H,W
-                mask_multiplier = mask_multiplier.unsqueeze(2)  # add time dimension back for video
-                mask_multiplier = mask_multiplier.repeat(1, 1, noise_pred.shape[2], 1, 1)
+                if mask_multiplier.ndim == 4:
+                    mask_multiplier = mask_multiplier.unsqueeze(2)  # add time dimension back for video
+                    mask_multiplier = mask_multiplier.repeat(1, 1, noise_pred.shape[2], 1, 1)
             loss = loss * mask_multiplier
         except Exception as e:
             # todo handle mask with video models
@@ -1488,16 +1498,25 @@ class SDTrainer(BaseSDTrainProcess):
                     # scale down to the size of the latents, mask multiplier shape(bs, 1, width, height), noisy_latents shape(bs, channels, width, height)
                     if len(noisy_latents.shape) == 5:
                         # video B,C,T,H,W
+                        t = noisy_latents.shape[2]
                         h = noisy_latents.shape[3]
                         w = noisy_latents.shape[4]
                     else:
                         h = noisy_latents.shape[2]
                         w = noisy_latents.shape[3]
-                    mask_multiplier = torch.nn.functional.interpolate(
-                        mask_multiplier, size=(h, w)
-                    )
-                    # expand to match latents
-                    mask_multiplier = mask_multiplier.expand(-1, noisy_latents.shape[1], -1, -1)
+                    if len(noisy_latents.shape) == 5 and mask_multiplier.ndim == 5:
+                        mask_multiplier = torch.nn.functional.interpolate(
+                            mask_multiplier, size=(t, h, w), mode='nearest'
+                        )
+                        mask_multiplier = mask_multiplier.expand(
+                            -1, noisy_latents.shape[1], -1, -1, -1
+                        )
+                    else:
+                        mask_multiplier = torch.nn.functional.interpolate(
+                            mask_multiplier, size=(h, w)
+                        )
+                        # expand to match latents
+                        mask_multiplier = mask_multiplier.expand(-1, noisy_latents.shape[1], -1, -1)
                     mask_multiplier = mask_multiplier.to(self.device_torch, dtype=dtype).detach()
                     # make avg 1.0
                     mask_multiplier = mask_multiplier / mask_multiplier.mean()
@@ -2203,19 +2222,13 @@ class SDTrainer(BaseSDTrainProcess):
                             and self.train_config.diff_output_preservation_mode == 'character'
                         )
                         if use_character_dop:
-                            is_audio_only = batch.dataset_config.is_audio_only
+                            character_dop_inputs = self.sd.get_character_dop_inputs(
+                                batch=batch,
+                                primary_prediction=noise_pred,
+                                preservation_prediction=preservation_pred,
+                                prior_prediction=prior_pred,
+                            )
                             character_losses = character_dop_losses(
-                                visual_prediction=None if is_audio_only else preservation_pred,
-                                visual_primary_prediction=None if is_audio_only else noise_pred,
-                                visual_prior=None if is_audio_only else prior_pred,
-                                audio_prediction=(
-                                    preservation_pred if is_audio_only
-                                    else batch.audio_pred_preservation
-                                ),
-                                audio_prior=(
-                                    prior_pred if is_audio_only
-                                    else batch.audio_pred_prior
-                                ),
                                 focus_fraction=self.train_config.diff_output_preservation_focus_fraction,
                                 base_multiplier=multiplier,
                                 every_n_steps=self.train_config.diff_output_preservation_every_n_steps,
@@ -2224,7 +2237,7 @@ class SDTrainer(BaseSDTrainProcess):
                                     self.train_config.diff_output_preservation_audio_multiplier
                                     * self.train_config.audio_loss_multiplier
                                 ),
-                                character_mask=None if is_audio_only else batch.mask_tensor,
+                                **character_dop_inputs,
                             )
                             preservation_loss = character_losses.total
                             self.additional_logs['loss/preservation'] = preservation_loss.item()

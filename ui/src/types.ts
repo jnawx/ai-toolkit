@@ -85,6 +85,7 @@ export interface SaveConfig {
 export interface DatasetConfig {
   folder_path: string;
   mask_path: string | null;
+  character_dop_audio_mask_path?: string | null;
   mask_min_value: number;
   default_caption: string;
   caption_ext: string;

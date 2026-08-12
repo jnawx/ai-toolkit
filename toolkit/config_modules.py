@@ -1035,6 +1035,9 @@ class DatasetConfig:
         self.alpha_mask: bool = kwargs.get('alpha_mask', False)  # if true, will use alpha channel as mask
         self.mask_path: str = kwargs.get('mask_path',
                                          None)  # focus mask (black and white. White has higher loss than black)
+        self.character_dop_audio_mask_path: str = kwargs.get(
+            'character_dop_audio_mask_path', None
+        )
         self.unconditional_path: str = kwargs.get('unconditional_path',
                                                   None)  # path where matching unconditional images are located
         self.invert_mask: bool = kwargs.get('invert_mask', False)  # invert mask
@@ -1537,6 +1540,17 @@ def validate_configs(
         raise ValueError(
             "Character LoRA DOP is currently supported only by MiniMax-H3"
         )
+
+    for dataset in dataset_configs:
+        if dataset.character_dop_audio_mask_path is not None:
+            if train_config.diff_output_preservation_mode != 'character':
+                raise ValueError(
+                    "character_dop_audio_mask_path requires character DOP mode"
+                )
+            if not dataset.do_audio:
+                raise ValueError(
+                    "character_dop_audio_mask_path requires do_audio on the dataset"
+                )
 
     audio_only_datasets = [dataset for dataset in dataset_configs if dataset.is_audio_only]
     if audio_only_datasets:

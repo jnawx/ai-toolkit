@@ -287,6 +287,18 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'datasets.character_dop_audio_mask_path': {
+    title: 'Character Speaking Masks',
+    description: (
+      <>
+        Optional folder of JSON sidecars for MiniMax-H3 Character LoRA DOP. Each media file uses a matching sidecar,
+        such as scene.mp4 and scene.json. The JSON must contain character_intervals as source-time pairs in seconds, for
+        example {`{"character_intervals": [[0.4, 1.8], [3.1, 4.0]]}`}. During those intervals the trigger may change
+        the voice; outside them, the trigger-conditioned audio is constrained to the base model to protect other
+        speakers. Intervals are automatically clipped and remapped when a training clip is trimmed or time-stretched.
+      </>
+    ),
+  },
   'train.diff_output_preservation_character': {
     title: 'Character LoRA DOP',
     description: (
@@ -296,9 +308,12 @@ const docs: { [key: string]: ConfigDoc } = {
         replaced by the preservation class. On MiniMax H3, video and soundtrack predictions are preserved separately.
         If a dataset mask is supplied, it must mark the trained character. The trigger-conditioned prediction is then
         constrained to match the base model outside that mask, directly allowing character changes inside the mask while
-        protecting other people and the scene. Without masks, the mode instead uses the largest counterfactual drifts as
-        a heuristic. Audio preservation keeps the LoRA close to the base model when the character trigger is absent, but
-        does not identify individual speakers. Sparse DOP schedules are automatically multiplied by their interval.
+        protecting other people and the scene. A matching THW .npy file in mask_path supplies moving per-frame masks for
+        videos; a normal image mask is repeated across frames. Without masks, the mode instead uses the largest
+        counterfactual drifts as a heuristic. Character-speaking JSON sidecars provide the equivalent direct constraint
+        for H3 audio. Without them, audio preservation keeps the LoRA close to the base model when the character trigger
+        is absent but cannot identify individual speakers. Sparse DOP schedules are automatically multiplied by their
+        interval.
       </>
     ),
   },

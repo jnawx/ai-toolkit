@@ -1,5 +1,5 @@
 import React, { useEffect, useState, ReactNode, KeyboardEvent, useRef } from 'react';
-import { FaTrashAlt } from 'react-icons/fa';
+import { FaExpand, FaTrashAlt } from 'react-icons/fa';
 import { openConfirm } from './ConfirmModal';
 import classNames from 'classnames';
 import { apiClient } from '@/utils/api';
@@ -201,6 +201,17 @@ const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
               muted
               controls
             />
+          )}
+          {isItAVideo && onImageClick && (
+            <button
+              type="button"
+              title="Open video details and Character DOP"
+              aria-label="Open video details and Character DOP"
+              onClick={onImageClick}
+              className="absolute left-2 top-2 z-10 flex items-center gap-1.5 rounded bg-gray-900/90 px-2 py-1.5 text-xs font-medium text-violet-300 shadow hover:bg-gray-800 hover:text-violet-200"
+            >
+              <FaExpand /> Open
+            </button>
           )}
           {isItAudio && !showAudioPlayer && (
             <div

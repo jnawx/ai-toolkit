@@ -231,6 +231,17 @@ const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
           {isItAudio && showAudioPlayer && (
             <AudioPlayer src={`/api/img/${encodeURIComponent(imageUrl)}`} title={imageUrl.replace(/^.*[\\/]/, '')} />
           )}
+          {isItAudio && onImageClick && (
+            <button
+              type="button"
+              title="Open audio details and Character DOP"
+              aria-label="Open audio details and Character DOP"
+              onClick={onImageClick}
+              className="absolute left-2 top-2 z-10 flex items-center gap-1.5 rounded bg-gray-900/90 px-2 py-1.5 text-xs font-medium text-violet-300 shadow hover:bg-gray-800 hover:text-violet-200"
+            >
+              <FaExpand /> Open
+            </button>
+          )}
           {isItImage && blobUrl && (
             <img
               src={blobUrl}

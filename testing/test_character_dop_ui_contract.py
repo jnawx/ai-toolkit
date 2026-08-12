@@ -21,6 +21,23 @@ class CharacterDOPUIContractTests(unittest.TestCase):
             "video cards need a dedicated viewer control so native playback controls remain usable",
         )
 
+    def test_dataset_audio_card_can_open_the_character_dop_annotator(self):
+        source = (
+            Path(__file__).parents[1] / "ui" / "src" / "components" / "DatasetImageCard.tsx"
+        ).read_text(encoding="utf-8")
+        audio_open_control = re.search(
+            r"\{isItAudio\s*&&\s*onImageClick\s*&&\s*\(.*?"
+            r'title="Open audio details and Character DOP".*?'
+            r"onClick=\{onImageClick\}",
+            source,
+            re.DOTALL,
+        )
+
+        self.assertIsNotNone(
+            audio_open_control,
+            "audio cards need a dedicated annotator control so playback remains usable",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

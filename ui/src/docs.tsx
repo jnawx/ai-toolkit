@@ -282,6 +282,31 @@ const docs: { [key: string]: ConfigDoc } = {
       <>
         Controls how often Differential Output Preservation runs. A value of 1 runs DOP on every training step. Larger
         values run it immediately and then once every N training steps, skipping both extra DOP model passes in between.
+        Character LoRA DOP compensates its active-step loss by N so the expected preservation weight stays stable;
+        standard DOP retains its legacy unscaled behavior.
+      </>
+    ),
+  },
+  'train.diff_output_preservation_character': {
+    title: 'Character LoRA DOP',
+    description: (
+      <>
+        Character LoRA DOP is a counterfactual preservation mode intended to keep a learned character identity and voice
+        bound to its trigger. It preserves the largest visual and audio changes made by the LoRA when the trigger is
+        replaced by the preservation class. On MiniMax H3, video and soundtrack predictions are preserved separately.
+        If a dataset mask is supplied, it must mark the trained character; visual preservation is then applied outside
+        that mask so other people and the surrounding scene receive the strongest protection. Sparse DOP schedules are
+        automatically multiplied by their interval in this mode.
+      </>
+    ),
+  },
+  'train.diff_output_preservation_focus_fraction': {
+    title: 'Character DOP Focus Fraction',
+    description: (
+      <>
+        The fraction of visual or audio tokens with the largest counterfactual drift that contribute to character DOP.
+        Lower values concentrate preservation on localized face, body, or voice leakage. A value of 1 uses every token;
+        0.25 is the recommended starting point.
       </>
     ),
   },

@@ -489,6 +489,33 @@ class TrainConfig:
         # DOP will will run the same image and prompt through the network without the trigger word blank and use it as a target
         self.diff_output_preservation = kwargs.get('diff_output_preservation', False)
         self.diff_output_preservation_multiplier = kwargs.get('diff_output_preservation_multiplier', 1.0)
+        self.diff_output_preservation_mode = kwargs.get('diff_output_preservation_mode', 'standard')
+        if self.diff_output_preservation_mode not in ('standard', 'character'):
+            raise ValueError(
+                "diff_output_preservation_mode must be either 'standard' or 'character'"
+            )
+        try:
+            self.diff_output_preservation_focus_fraction = float(
+                kwargs.get('diff_output_preservation_focus_fraction', 0.25)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "diff_output_preservation_focus_fraction must be in the range (0, 1]"
+            ) from exc
+        if not 0.0 < self.diff_output_preservation_focus_fraction <= 1.0:
+            raise ValueError(
+                "diff_output_preservation_focus_fraction must be in the range (0, 1]"
+            )
+        self.diff_output_preservation_visual_multiplier = float(
+            kwargs.get('diff_output_preservation_visual_multiplier', 1.0)
+        )
+        self.diff_output_preservation_audio_multiplier = float(
+            kwargs.get('diff_output_preservation_audio_multiplier', 1.0)
+        )
+        if self.diff_output_preservation_visual_multiplier < 0.0:
+            raise ValueError("diff_output_preservation_visual_multiplier must be non-negative")
+        if self.diff_output_preservation_audio_multiplier < 0.0:
+            raise ValueError("diff_output_preservation_audio_multiplier must be non-negative")
         diff_output_preservation_interval = kwargs.get('diff_output_preservation_every_n_steps', 1)
         try:
             diff_output_preservation_interval = float(diff_output_preservation_interval)

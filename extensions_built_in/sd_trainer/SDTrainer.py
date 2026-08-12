@@ -41,6 +41,7 @@ from toolkit.unloader import unload_text_encoder
 from PIL import Image
 from torchvision.transforms import functional as TF
 from toolkit.basic import flush
+from toolkit.character_dop import character_dop_losses
 
 
 adapter_transforms = transforms.Compose([
@@ -1359,6 +1360,7 @@ class SDTrainer(BaseSDTrainProcess):
         if self.train_config.diff_output_preservation and not do_diff_output_preservation:
             self.additional_logs.pop('loss/normal', None)
             self.additional_logs.pop('loss/preservation', None)
+            self.additional_logs.pop('loss/preservation_visual', None)
             self.additional_logs.pop('loss/preservation_audio', None)
         with torch.no_grad():
             self.timer.start('preprocess_batch')
@@ -2196,20 +2198,58 @@ class SDTrainer(BaseSDTrainProcess):
                         )
                         batch.audio_pred_slot = None
                         multiplier = self.train_config.diff_output_preservation_multiplier if do_diff_output_preservation else self.train_config.blank_prompt_preservation_multiplier
-                        preservation_loss = torch.nn.functional.mse_loss(preservation_pred, prior_pred) * multiplier
-                        self.additional_logs['loss/normal'] = loss.item()
-                        self.additional_logs['loss/preservation'] = preservation_loss.item()
+                        use_character_dop = (
+                            do_diff_output_preservation
+                            and self.train_config.diff_output_preservation_mode == 'character'
+                        )
+                        if use_character_dop:
+                            is_audio_only = batch.dataset_config.is_audio_only
+                            character_losses = character_dop_losses(
+                                visual_prediction=None if is_audio_only else preservation_pred,
+                                visual_prior=None if is_audio_only else prior_pred,
+                                audio_prediction=(
+                                    preservation_pred if is_audio_only
+                                    else batch.audio_pred_preservation
+                                ),
+                                audio_prior=(
+                                    prior_pred if is_audio_only
+                                    else batch.audio_pred_prior
+                                ),
+                                focus_fraction=self.train_config.diff_output_preservation_focus_fraction,
+                                base_multiplier=multiplier,
+                                every_n_steps=self.train_config.diff_output_preservation_every_n_steps,
+                                visual_multiplier=self.train_config.diff_output_preservation_visual_multiplier,
+                                audio_multiplier=(
+                                    self.train_config.diff_output_preservation_audio_multiplier
+                                    * self.train_config.audio_loss_multiplier
+                                ),
+                                character_mask=None if is_audio_only else batch.mask_tensor,
+                            )
+                            preservation_loss = character_losses.total
+                            self.additional_logs['loss/preservation'] = preservation_loss.item()
+                            if character_losses.visual is not None:
+                                self.additional_logs['loss/preservation_visual'] = character_losses.visual.item()
+                            else:
+                                self.additional_logs.pop('loss/preservation_visual', None)
+                            if character_losses.audio is not None:
+                                self.additional_logs['loss/preservation_audio'] = character_losses.audio.item()
+                            else:
+                                self.additional_logs.pop('loss/preservation_audio', None)
+                        else:
+                            preservation_loss = torch.nn.functional.mse_loss(preservation_pred, prior_pred) * multiplier
+                            self.additional_logs['loss/preservation'] = preservation_loss.item()
 
-                        # preserve the audio stream of joint audio models too.
-                        # Both passes ran on the same noisy audio, so this holds
-                        # the audio branch to its base model output.
-                        if batch.audio_pred_preservation is not None and batch.audio_pred_prior is not None:
-                            audio_preservation_loss = torch.nn.functional.mse_loss(
-                                batch.audio_pred_preservation.float(),
-                                batch.audio_pred_prior.float(),
-                            ) * multiplier * self.train_config.audio_loss_multiplier
-                            self.additional_logs['loss/preservation_audio'] = audio_preservation_loss.item()
-                            preservation_loss = preservation_loss + audio_preservation_loss
+                            # preserve the audio stream of joint audio models too.
+                            # Both passes ran on the same noisy audio, so this holds
+                            # the audio branch to its base model output.
+                            if batch.audio_pred_preservation is not None and batch.audio_pred_prior is not None:
+                                audio_preservation_loss = torch.nn.functional.mse_loss(
+                                    batch.audio_pred_preservation.float(),
+                                    batch.audio_pred_prior.float(),
+                                ) * multiplier * self.train_config.audio_loss_multiplier
+                                self.additional_logs['loss/preservation_audio'] = audio_preservation_loss.item()
+                                preservation_loss = preservation_loss + audio_preservation_loss
+                        self.additional_logs['loss/normal'] = loss.item()
 
                         loss = loss + preservation_loss
 

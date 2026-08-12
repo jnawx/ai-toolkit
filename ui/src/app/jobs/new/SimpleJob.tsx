@@ -878,13 +878,75 @@ export default function SimpleJob({
                         />
                         <TextInput
                           label="DOP Preservation Class"
-                          className="pt-2 pb-4"
+                          className="pt-2"
                           value={jobConfig.config.process[0].train.diff_output_preservation_class as string}
                           onChange={value =>
                             setJobConfig(value, 'config.process[0].train.diff_output_preservation_class')
                           }
                           placeholder="eg. woman"
                         />
+                        <Checkbox
+                          label="Character LoRA DOP"
+                          docKey="train.diff_output_preservation_character"
+                          className="pt-2"
+                          checked={
+                            jobConfig.config.process[0].train.diff_output_preservation_mode === 'character'
+                          }
+                          onChange={value =>
+                            setJobConfig(
+                              value ? 'character' : 'standard',
+                              'config.process[0].train.diff_output_preservation_mode',
+                            )
+                          }
+                        />
+                        {jobConfig.config.process[0].train.diff_output_preservation_mode === 'character' && (
+                          <>
+                            <NumberInput
+                              label="Character DOP Focus Fraction"
+                              docKey="train.diff_output_preservation_focus_fraction"
+                              className="pt-2"
+                              value={
+                                jobConfig.config.process[0].train.diff_output_preservation_focus_fraction ?? 0.25
+                              }
+                              onChange={value =>
+                                setJobConfig(
+                                  value,
+                                  'config.process[0].train.diff_output_preservation_focus_fraction',
+                                )
+                              }
+                              min={0.01}
+                              max={1}
+                            />
+                            <NumberInput
+                              label="Character DOP Visual Multiplier"
+                              className="pt-2"
+                              value={
+                                jobConfig.config.process[0].train.diff_output_preservation_visual_multiplier ?? 1
+                              }
+                              onChange={value =>
+                                setJobConfig(
+                                  value,
+                                  'config.process[0].train.diff_output_preservation_visual_multiplier',
+                                )
+                              }
+                              min={0}
+                            />
+                            <NumberInput
+                              label="Character DOP Audio Multiplier"
+                              className="pt-2 pb-4"
+                              value={
+                                jobConfig.config.process[0].train.diff_output_preservation_audio_multiplier ?? 1
+                              }
+                              onChange={value =>
+                                setJobConfig(
+                                  value,
+                                  'config.process[0].train.diff_output_preservation_audio_multiplier',
+                                )
+                              }
+                              min={0}
+                            />
+                          </>
+                        )}
                       </>
                     )}
                   </>

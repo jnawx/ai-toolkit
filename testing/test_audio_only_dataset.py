@@ -95,6 +95,12 @@ class AudioWaveformPreparationTests(unittest.TestCase):
 
 
 class AudioSegmentationTests(unittest.TestCase):
+    def test_video_audio_loader_imports_the_segment_metadata_it_constructs(self):
+        import toolkit.dataloader_mixins as dataloader_mixins
+        from toolkit.audio.processing import AudioSegment
+
+        self.assertIs(dataloader_mixins.AudioSegment, AudioSegment)
+
     def test_audio_uses_next_whole_second_duration_bucket(self):
         from toolkit.audio.processing import plan_audio_segment
 

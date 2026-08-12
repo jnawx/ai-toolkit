@@ -21,6 +21,7 @@ from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection, Sigl
 
 from toolkit.audio.preserve_pitch import time_stretch_preserve_pitch
 from toolkit.audio.processing import (
+    AudioSegment,
     load_audio_segment,
     prepare_audio_for_training,
     waveform_to_stereo,

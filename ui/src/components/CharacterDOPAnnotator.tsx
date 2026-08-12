@@ -1,7 +1,7 @@
 'use client';
 
 import { Dialog, DialogBackdrop, DialogPanel } from '@headlessui/react';
-import { AudioLines, Check, Loader2, MousePointer2, Pause, Play, RotateCcw, Save, ScanSearch, Trash2, X } from 'lucide-react';
+import { AudioLines, Check, Loader2, MousePointer2, Pause, Play, RotateCcw, Save, ScanSearch, Trash2, UserRoundSearch, Users, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { apiClient } from '@/utils/api';
@@ -18,6 +18,39 @@ type AnnotationState = {
   audio: { exists: boolean; path: string; intervals: SpeakingInterval[] };
   prompts: CharacterPrompt[];
 };
+
+type MaskModel = {
+  id: string;
+  label: string;
+  description: string;
+  gated?: boolean;
+};
+
+type MaskModelCatalog = {
+  trackers: MaskModel[];
+  detectors: MaskModel[];
+  defaults: { tracker: string; detector: string; concept: string };
+};
+
+type MaskCandidate = {
+  id: number;
+  score: number;
+  box: [number, number, number, number];
+  area: number;
+  mask_data_url: string;
+};
+
+type DetectionResult = {
+  concept: string;
+  model_id: string;
+  time_seconds: number;
+  width: number;
+  height: number;
+  candidates: MaskCandidate[];
+};
+
+const DEFAULT_TRACKER_MODEL = 'facebook/sam2.1-hiera-tiny';
+const DEFAULT_DETECTOR_MODEL = 'facebook/sam3';
 
 type Props = {
   open: boolean;
@@ -145,11 +178,18 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [preview, setPreview] = useState<string | null>(null);
+  const [previewRevision, setPreviewRevision] = useState(0);
   const [showPreview, setShowPreview] = useState(true);
+  const [modelCatalog, setModelCatalog] = useState<MaskModelCatalog | null>(null);
+  const [trackerModel, setTrackerModel] = useState(DEFAULT_TRACKER_MODEL);
+  const [detectorModel, setDetectorModel] = useState(DEFAULT_DETECTOR_MODEL);
+  const [concept, setConcept] = useState('person');
+  const [detection, setDetection] = useState<DetectionResult | null>(null);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
   const [peaks, setPeaks] = useState<number[]>([]);
   const [markStart, setMarkStart] = useState<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [busy, setBusy] = useState<'load' | 'track' | 'audio' | null>(null);
+  const [busy, setBusy] = useState<'load' | 'detect' | 'track' | 'audio' | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const videoItem = isVideo(mediaPath);
@@ -178,15 +218,21 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     setError(null);
     setMessage(null);
     setPreview(null);
+    setDetection(null);
+    setSelectedCandidateIds([]);
     setCurrentTime(0);
     setDuration(0);
     setPeaks([]);
-    request('state')
-      .then((nextState: AnnotationState) => {
+    Promise.all([request('state'), request('models')])
+      .then(([nextState, catalog]: [AnnotationState, MaskModelCatalog]) => {
         if (cancelled) return;
         setState(nextState);
         setPrompts(nextState.prompts ?? []);
         setIntervals(nextState.audio?.intervals ?? []);
+        setModelCatalog(catalog);
+        setTrackerModel(catalog.defaults.tracker);
+        setDetectorModel(catalog.defaults.detector);
+        setConcept(catalog.defaults.concept);
       })
       .catch(reason => !cancelled && setError(reason?.response?.data?.error || reason.message))
       .finally(() => !cancelled && setBusy(null));
@@ -253,7 +299,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
         .catch(() => setPreview(null));
     }, 120);
     return () => clearTimeout(timer);
-  }, [open, state?.visual?.exists, showPreview, frameIndex, request]);
+  }, [open, state?.visual?.exists, showPreview, frameIndex, previewRevision, request]);
 
   const activePromptIndex = useMemo(() => {
     if (!prompts.length) return -1;
@@ -272,6 +318,10 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
 
   const addPoint = (event: React.PointerEvent<HTMLDivElement>) => {
     if (busy) return;
+    if (detectionIsOnCurrentFrame) {
+      setMessage('Use the numbered person toggles on the auto-mask frame. Add manual corrections on other video frames, or clear the auto-mask to use points here.');
+      return;
+    }
     const rect = event.currentTarget.getBoundingClientRect();
     const point: CharacterPoint = {
       x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
@@ -294,14 +344,76 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     setCurrentTime(next);
   };
 
+  const selectedCandidates = useMemo(
+    () => detection?.candidates.filter(candidate => selectedCandidateIds.includes(candidate.id)) ?? [],
+    [detection, selectedCandidateIds],
+  );
+  const selectedCandidateSet = useMemo(() => new Set(selectedCandidateIds), [selectedCandidateIds]);
+  const selectedTracker = modelCatalog?.trackers.find(model => model.id === trackerModel);
+  const detectionIsOnCurrentFrame = Boolean(
+    detection && (!videoItem || Math.abs(detection.time_seconds - currentTime) <= 0.08),
+  );
+
+  const toggleCandidate = (candidateId: number) => {
+    setSelectedCandidateIds(previous =>
+      previous.includes(candidateId)
+        ? previous.filter(id => id !== candidateId)
+        : [...previous, candidateId],
+    );
+  };
+
+  const autoMaskPeople = async () => {
+    const seedTime = currentTime;
+    const seedPointCount = prompts
+      .filter(prompt => !videoItem || Math.abs(prompt.time_seconds - seedTime) <= 0.08)
+      .reduce((total, prompt) => total + prompt.points.length, 0);
+    setBusy('detect');
+    setError(null);
+    setMessage('SAM 3 is finding every matching person in this frame. Its first run downloads the gated model.');
+    videoRef.current?.pause();
+    try {
+      const result: DetectionResult = await request('detect', {
+        concept: concept.trim() || 'person',
+        timeSeconds: seedTime,
+        modelId: detectorModel,
+      });
+      setDetection(result);
+      setSelectedCandidateIds(result.candidates.map(candidate => candidate.id));
+      if (result.candidates.length) {
+        setPrompts(previous =>
+          previous.filter(prompt => videoItem && Math.abs(prompt.time_seconds - seedTime) > 0.08),
+        );
+      }
+      setShowPreview(false);
+      setMessage(
+        result.candidates.length
+          ? `Found ${result.candidates.length} ${result.concept} instance(s). They all start included; exclude everyone except the training character.${seedPointCount ? ` Cleared ${seedPointCount} seed-frame point(s) because the auto-mask replaces them.` : ''}`
+          : `SAM 3 did not find any instances matching “${result.concept}” on this frame.`,
+      );
+    } catch (reason: any) {
+      setError(reason?.response?.data?.error || reason.message || 'Automatic person masking failed');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const trackCharacter = async () => {
     setBusy('track');
     setError(null);
-    setMessage('SAM2 is preparing and tracking the target character through the source media. The first run downloads the model.');
+    setMessage(`${selectedTracker?.label ?? 'SAM 2'} is tracking the selected character through the source media. Its first run downloads the model.`);
     try {
-      const nextState: AnnotationState = await request('track', { prompts });
+      const nextState: AnnotationState = await request('track', {
+        prompts,
+        initialMasks: selectedCandidates.map(candidate => candidate.mask_data_url),
+        initialTimeSeconds: selectedCandidates.length ? detection?.time_seconds : undefined,
+        modelId: trackerModel,
+      });
       setState(nextState);
       setPrompts(nextState.prompts);
+      setDetection(null);
+      setSelectedCandidateIds([]);
+      setPreviewRevision(previous => previous + 1);
+      setShowPreview(true);
       setMessage(`Visual character mask saved across ${nextState.visual.shape?.[0] ?? 1} frame(s).`);
     } catch (reason: any) {
       setError(reason?.response?.data?.error || reason.message || 'Character tracking failed');
@@ -377,6 +489,15 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                   {preview && showPreview && (
                     <img src={preview} alt="Character mask preview" className="pointer-events-none absolute inset-0 h-full w-full opacity-45" />
                   )}
+                  {detectionIsOnCurrentFrame && !showPreview && selectedCandidates.map(candidate => (
+                    <img
+                      key={`candidate-mask-${candidate.id}`}
+                      src={candidate.mask_data_url}
+                      alt=""
+                      className="pointer-events-none absolute inset-0 h-full w-full opacity-40"
+                      style={{ mixBlendMode: 'screen' }}
+                    />
+                  ))}
                   <div className="absolute inset-0 cursor-crosshair" onPointerDown={addPoint}>
                     {activePoints.map((point, index) => (
                       <span
@@ -387,6 +508,28 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                         style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%` }}
                       />
                     ))}
+                    {detectionIsOnCurrentFrame && detection?.candidates.map(candidate => {
+                      const centerX = detection.width ? ((candidate.box[0] + candidate.box[2]) / 2 / detection.width) * 100 : 50;
+                      const centerY = detection.height ? ((candidate.box[1] + candidate.box[3]) / 2 / detection.height) * 100 : 50;
+                      const selected = selectedCandidateSet.has(candidate.id);
+                      return (
+                        <button
+                          key={`candidate-button-${candidate.id}`}
+                          type="button"
+                          title={selected ? `Person ${candidate.id}: included (click to exclude)` : `Person ${candidate.id}: excluded (click to include)`}
+                          className={`absolute z-10 flex h-8 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white text-xs font-bold text-white shadow-lg ${
+                            selected ? 'bg-violet-600' : 'bg-red-600'
+                          }`}
+                          style={{ left: `${centerX}%`, top: `${centerY}%` }}
+                          onPointerDown={event => {
+                            event.stopPropagation();
+                            toggleCandidate(candidate.id);
+                          }}
+                        >
+                          {candidate.id}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -403,8 +546,95 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                     {state?.visual.exists && <span className="flex items-center gap-1 text-xs text-emerald-400"><Check size={14} /> Mask ready</span>}
                   </div>
                   <p className="text-xs leading-relaxed text-gray-400">
-                    Click the target character in green. Click other people or background in red. Add corrections on later frames, then run SAM2.
+                    Auto-mask finds everyone first. Exclude the other people, then track only the training character through the shot.
                   </p>
+                  <div className="space-y-3 rounded-lg border border-violet-900/70 bg-violet-950/20 p-3">
+                    <div className="flex items-center gap-2 text-xs font-medium text-violet-200">
+                      <UserRoundSearch size={16} /> Auto-mask with text
+                    </div>
+                    <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                      <input
+                        value={concept}
+                        onChange={event => setConcept(event.target.value)}
+                        placeholder="person"
+                        aria-label="Concept to auto-mask"
+                        className="min-w-0 rounded border border-gray-700 bg-gray-900 px-2.5 py-2 text-gray-100 outline-none focus:border-violet-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={autoMaskPeople}
+                        disabled={Boolean(busy) || !concept.trim()}
+                        className="flex items-center justify-center gap-1.5 rounded bg-violet-700 px-3 py-2 font-medium text-white hover:bg-violet-600 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {busy === 'detect' ? <Loader2 size={16} className="animate-spin" /> : <Users size={16} />}
+                        Find all
+                      </button>
+                    </div>
+                    <select
+                      value={detectorModel}
+                      onChange={event => setDetectorModel(event.target.value)}
+                      disabled={Boolean(busy)}
+                      aria-label="Auto-mask detector model"
+                      className="w-full rounded border border-gray-700 bg-gray-900 px-2.5 py-2 text-xs text-gray-200"
+                    >
+                      {(modelCatalog?.detectors ?? []).map(model => (
+                        <option key={model.id} value={model.id}>{model.label}</option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] leading-relaxed text-gray-500">
+                      SAM 3 returns separate masks for up to 64 matches per frame. It requires accepted Hugging Face access and an authenticated token in the container.
+                    </p>
+                  </div>
+                  {detection && (
+                    <div className="space-y-2 rounded-lg border border-gray-800 bg-gray-900/60 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-gray-200">
+                          {selectedCandidates.length} of {detection.candidates.length} included
+                        </span>
+                        <button
+                          type="button"
+                          className="text-[11px] text-gray-400 hover:text-white"
+                          onClick={() => {
+                            setDetection(null);
+                            setSelectedCandidateIds([]);
+                          }}
+                        >
+                          Clear auto-mask
+                        </button>
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-gray-400">
+                        All matches start included. Click a numbered person on the image or below to exclude everyone except your character.
+                      </p>
+                      <div className="grid max-h-36 grid-cols-2 gap-1.5 overflow-y-auto">
+                        {detection.candidates.map(candidate => {
+                          const selected = selectedCandidateSet.has(candidate.id);
+                          return (
+                            <button
+                              key={candidate.id}
+                              type="button"
+                              onClick={() => toggleCandidate(candidate.id)}
+                              className={`flex items-center gap-2 rounded border px-2 py-1.5 text-left text-xs ${
+                                selected
+                                  ? 'border-violet-500 bg-violet-950/50 text-violet-100'
+                                  : 'border-gray-700 bg-gray-950 text-gray-500'
+                              }`}
+                            >
+                              <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white ${selected ? 'bg-violet-600' : 'bg-red-700'}`}>
+                                {candidate.id}
+                              </span>
+                              <span>{selected ? 'Included' : 'Excluded'}</span>
+                              <span className="ml-auto text-[10px] opacity-60">{Math.round(candidate.score * 100)}%</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {selectedCandidates.length > 1 && (
+                        <p className="rounded border border-amber-800 bg-amber-950/40 p-2 text-[11px] text-amber-200">
+                          Multiple people are still included. Their identities can be learned together; exclude everyone except the target character.
+                        </p>
+                      )}
+                    </div>
+                  )}
                   {videoItem && duration > 0 && (
                     <div className="space-y-1">
                       <div className="flex items-center gap-2">
@@ -446,6 +676,9 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                       Exclude others
                     </button>
                   </div>
+                  <p className="text-[11px] leading-relaxed text-gray-500">
+                    Manual correction: add green points on missed target areas and red points on spill. With an auto-mask, point corrections apply on other video frames; clear it to use points on the seed frame.
+                  </p>
                   <div className="flex flex-wrap gap-2">
                     <button
                       className="flex items-center gap-1 rounded bg-gray-800 px-2 py-1.5 text-xs hover:bg-gray-700"
@@ -460,13 +693,28 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                       </button>
                     )}
                   </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-gray-300" htmlFor="character-dop-tracker">Tracking model</label>
+                    <select
+                      id="character-dop-tracker"
+                      value={trackerModel}
+                      onChange={event => setTrackerModel(event.target.value)}
+                      disabled={Boolean(busy)}
+                      className="w-full rounded border border-gray-700 bg-gray-900 px-2.5 py-2 text-gray-200"
+                    >
+                      {(modelCatalog?.trackers ?? []).map(model => (
+                        <option key={model.id} value={model.id}>{model.label}</option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-gray-500">{selectedTracker?.description}</p>
+                  </div>
                   <button
                     className="flex w-full items-center justify-center gap-2 rounded bg-violet-600 px-3 py-2 font-medium text-white hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={Boolean(busy) || prompts.length === 0}
+                    disabled={Boolean(busy) || (detection ? selectedCandidates.length === 0 : prompts.length === 0)}
                     onClick={trackCharacter}
                   >
                     {busy === 'track' ? <Loader2 size={17} className="animate-spin" /> : <ScanSearch size={17} />}
-                    {state?.visual.exists ? 'Regenerate mask with SAM2' : 'Generate mask with SAM2'}
+                    {detection ? `Track selected with ${selectedTracker?.label ?? 'SAM 2'}` : `${state?.visual.exists ? 'Regenerate' : 'Generate'} with ${selectedTracker?.label ?? 'SAM 2'}`}
                   </button>
                   <p className="text-[11px] text-gray-500">Green permits character learning. Everything outside the generated mask is protected from identity bleed.</p>
                 </section>

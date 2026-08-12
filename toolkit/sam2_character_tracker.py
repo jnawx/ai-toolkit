@@ -4,8 +4,13 @@ from typing import Callable
 import numpy as np
 from PIL import Image
 
+from toolkit.character_mask_models import (
+    DEFAULT_SAM2_TRACKER_MODEL,
+    validate_character_mask_model,
+)
 
-DEFAULT_SAM2_MODEL = "facebook/sam2.1-hiera-tiny"
+
+DEFAULT_SAM2_MODEL = DEFAULT_SAM2_TRACKER_MODEL
 MAX_VIDEO_FRAMES = 1200
 MAX_SAVED_MASK_EDGE = 768
 
@@ -77,6 +82,8 @@ def _resize_mask_stack(mask: np.ndarray, max_edge: int) -> np.ndarray:
 def track_with_sam2(
     media_path: Path,
     prompts: list[dict],
+    initial_mask: np.ndarray | None,
+    initial_time_seconds: float | None,
     progress: Callable[[str], None],
     *,
     model_id: str = DEFAULT_SAM2_MODEL,
@@ -85,6 +92,7 @@ def track_with_sam2(
     import torch
     from transformers import Sam2VideoModel, Sam2VideoProcessor
 
+    model_id = validate_character_mask_model(model_id, kind="tracker")
     progress("Decoding source media")
     frames, frame_times = _load_media_frames(media_path)
     width, height = frames[0].size
@@ -107,8 +115,26 @@ def track_with_sam2(
         frame_index = _prompt_frame_index(prompt["time_seconds"], frame_times)
         prompts_by_frame.setdefault(frame_index, []).extend(prompt["points"])
 
-    progress("Applying include/exclude points")
+    initial_mask_frame = None
+    if initial_mask is not None:
+        if initial_time_seconds is None:
+            raise ValueError("SAM2 auto-mask tracking requires its source time")
+        initial_mask_frame = _prompt_frame_index(initial_time_seconds, frame_times)
+        if initial_mask.ndim != 2:
+            raise ValueError("SAM2 initial character mask must have shape HW")
+        if initial_mask_frame in prompts_by_frame:
+            del prompts_by_frame[initial_mask_frame]
+
+    progress("Applying the character seed mask and manual corrections")
     with torch.inference_mode():
+        if initial_mask is not None and initial_mask_frame is not None:
+            processor.add_inputs_to_inference_session(
+                inference_session=session,
+                frame_idx=initial_mask_frame,
+                obj_ids=1,
+                input_masks=[initial_mask],
+            )
+            model(inference_session=session, frame_idx=initial_mask_frame)
         for frame_index, points in sorted(prompts_by_frame.items()):
             processor.add_inputs_to_inference_session(
                 inference_session=session,
@@ -120,7 +146,12 @@ def track_with_sam2(
             model(inference_session=session, frame_idx=frame_index)
 
         masks: dict[int, np.ndarray] = {}
-        first_prompt_frame = min(prompts_by_frame)
+        seed_frames = list(prompts_by_frame)
+        if initial_mask_frame is not None:
+            seed_frames.append(initial_mask_frame)
+        if not seed_frames:
+            raise ValueError("SAM2 tracking requires points or an initial mask")
+        first_prompt_frame = min(seed_frames)
         progress(f"Tracking character through {len(frames)} frames")
         for output in model.propagate_in_video_iterator(
             session,

@@ -9,10 +9,15 @@ import numpy as np
 from PIL import Image
 
 from toolkit.character_dop_schema import validate_character_audio_intervals
+from toolkit.character_mask_models import validate_character_mask_model
 
 
 ANNOTATION_DIRECTORY = "_character_dop"
 VISUAL_MASK_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+MAX_AUTO_MASK_EDGE = 768
+MAX_AUTO_MASK_COUNT = 64
+MAX_AUTO_MASK_DATA_URL_LENGTH = 2 * 1024 * 1024
+MAX_AUTO_MASK_TOTAL_DATA_URL_LENGTH = 24 * 1024 * 1024
 
 
 def is_character_annotation_artifact(file_path: Path, dataset_dir: Path) -> bool:
@@ -100,6 +105,120 @@ def _write_json(path: Path, payload: Any) -> None:
         encoding="utf-8",
     )
     temporary_path.replace(path)
+
+
+def _mask_data_url(mask: np.ndarray) -> str:
+    frame = (np.asarray(mask) > 0).astype(np.uint8) * 255
+    if frame.ndim != 2:
+        raise ValueError("character instance masks must have shape HW")
+    buffer = io.BytesIO()
+    Image.fromarray(frame, mode="L").save(buffer, format="PNG", optimize=True)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _decode_mask_data_url(data_url: str) -> np.ndarray:
+    prefix = "data:image/png;base64,"
+    if not isinstance(data_url, str) or not data_url.startswith(prefix):
+        raise ValueError("character auto-mask must be a base64 PNG data URL")
+    encoded = data_url[len(prefix):]
+    if len(encoded) > MAX_AUTO_MASK_DATA_URL_LENGTH:
+        raise ValueError("character auto-mask payload is too large")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        with Image.open(io.BytesIO(raw)) as image:
+            if max(image.size) > MAX_AUTO_MASK_EDGE:
+                raise ValueError("character auto-mask dimensions are too large")
+            mask = (np.asarray(image.convert("L")) > 0).astype(np.uint8)
+    except Exception as exc:
+        raise ValueError("character auto-mask PNG could not be decoded") from exc
+    return mask
+
+
+def _combine_mask_data_urls(data_urls: Sequence[str]) -> np.ndarray:
+    if not data_urls:
+        raise ValueError("select at least one detected character mask")
+    if len(data_urls) > MAX_AUTO_MASK_COUNT:
+        raise ValueError(f"select no more than {MAX_AUTO_MASK_COUNT} character masks")
+    if sum(len(data_url) for data_url in data_urls) > MAX_AUTO_MASK_TOTAL_DATA_URL_LENGTH:
+        raise ValueError("selected character mask payload is too large")
+    masks = [_decode_mask_data_url(data_url) for data_url in data_urls]
+    if any(mask.shape != masks[0].shape for mask in masks[1:]):
+        raise ValueError("selected character masks have different dimensions")
+    return np.maximum.reduce(masks)
+
+
+def detect_character_instances(
+    *,
+    dataset_dir: Path,
+    media_path: Path,
+    time_seconds: float,
+    concept: str,
+    model_id: str,
+    detector: Callable[[Path, float, str, str, Callable[[str], None]], list[dict]],
+    progress: Callable[[str], None] = lambda _message: None,
+) -> dict:
+    """Detect selectable instances of a text concept on one source frame."""
+    _resolved_media(dataset_dir, media_path)
+    media_path = Path(media_path).resolve(strict=True)
+    model_id = validate_character_mask_model(model_id, kind="detector")
+    concept = str(concept).strip()
+    if not concept:
+        raise ValueError("character auto-mask concept cannot be blank")
+    time_seconds = float(time_seconds)
+    if not np.isfinite(time_seconds) or time_seconds < 0.0:
+        raise ValueError("character auto-mask time must be non-negative")
+
+    detections = detector(media_path, time_seconds, concept, model_id, progress)
+    candidates = []
+    expected_shape = None
+    for index, detection in enumerate(detections[:MAX_AUTO_MASK_COUNT], start=1):
+        mask = (np.asarray(detection["mask"]) > 0).astype(np.uint8)
+        if mask.ndim != 2 or min(mask.shape) < 1:
+            raise ValueError("character detector returned a mask without shape HW")
+        source_height, source_width = mask.shape
+        scale = min(1.0, MAX_AUTO_MASK_EDGE / float(max(mask.shape)))
+        if scale < 1.0:
+            target_size = (
+                max(1, round(source_width * scale)),
+                max(1, round(source_height * scale)),
+            )
+            mask = (
+                np.asarray(
+                    Image.fromarray(mask * 255).resize(
+                        target_size,
+                        Image.Resampling.NEAREST,
+                    )
+                )
+                > 0
+            ).astype(np.uint8)
+        if expected_shape is None:
+            expected_shape = mask.shape
+        elif mask.shape != expected_shape:
+            raise ValueError("character detector returned masks with different dimensions")
+        box = [round(float(value) * scale, 4) for value in detection.get("box", [])]
+        if len(box) != 4 or not all(np.isfinite(value) for value in box):
+            raise ValueError("character detector boxes must be xyxy")
+        score = float(detection.get("score", 0.0))
+        if not np.isfinite(score):
+            raise ValueError("character detector scores must be finite")
+        candidates.append(
+            {
+                "id": index,
+                "score": score,
+                "box": box,
+                "area": int(mask.sum()),
+                "mask_data_url": _mask_data_url(mask),
+            }
+        )
+    return {
+        "concept": concept,
+        "model_id": model_id,
+        "time_seconds": time_seconds,
+        "width": int(expected_shape[1]) if expected_shape else 0,
+        "height": int(expected_shape[0]) if expected_shape else 0,
+        "candidates": candidates,
+    }
 
 
 def invalidate_character_annotation_latents(media_path: Path) -> int:
@@ -192,15 +311,42 @@ def track_character_visual_mask(
     dataset_dir: Path,
     media_path: Path,
     prompts: Any,
-    tracker: Callable[[Path, list[dict], Callable[[str], None]], np.ndarray],
+    tracker: Callable[
+        [Path, list[dict], Optional[np.ndarray], Optional[float], Callable[[str], None]],
+        np.ndarray,
+    ],
+    initial_mask_data_urls: Sequence[str] = (),
+    initial_time_seconds: Optional[float] = None,
     progress: Callable[[str], None] = lambda _message: None,
 ) -> dict:
     paths = get_character_annotation_paths(
         dataset_dir=dataset_dir,
         media_path=media_path,
     )
-    validated_prompts = validate_character_visual_prompts(prompts)
-    mask = tracker(Path(media_path).resolve(), validated_prompts, progress)
+    initial_mask = (
+        _combine_mask_data_urls(initial_mask_data_urls)
+        if initial_mask_data_urls
+        else None
+    )
+    if prompts:
+        validated_prompts = validate_character_visual_prompts(prompts)
+    elif initial_mask is not None:
+        validated_prompts = []
+    else:
+        raise ValueError("character visual tracking requires points or an auto-mask")
+    if initial_mask is not None:
+        if initial_time_seconds is None:
+            raise ValueError("character auto-mask tracking requires its source time")
+        initial_time_seconds = float(initial_time_seconds)
+        if not np.isfinite(initial_time_seconds) or initial_time_seconds < 0.0:
+            raise ValueError("character auto-mask time must be non-negative")
+    mask = tracker(
+        Path(media_path).resolve(),
+        validated_prompts,
+        initial_mask,
+        initial_time_seconds,
+        progress,
+    )
     save_character_visual_mask(
         dataset_dir=dataset_dir,
         media_path=media_path,

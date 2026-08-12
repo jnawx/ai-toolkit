@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image
 
 from toolkit.character_dop_annotation import (
+    detect_character_instances,
     find_matching_character_visual_mask,
     get_character_mask_preview,
     get_character_annotation_paths,
@@ -23,6 +24,66 @@ from toolkit.character_dop_annotation import (
 
 
 class CharacterDOPAnnotationStorageTests(unittest.TestCase):
+    def test_auto_mask_returns_each_detected_person_as_a_selectable_mask(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "group.jpg"
+            Image.new("RGB", (8, 6)).save(media_path)
+            first = np.zeros((6, 8), dtype=np.uint8)
+            first[:, :3] = 1
+            second = np.zeros((6, 8), dtype=np.uint8)
+            second[:, 5:] = 1
+            received = []
+
+            def detector(path, time_seconds, concept, model_id, _progress):
+                received.append((path, time_seconds, concept, model_id))
+                return [
+                    {"mask": first, "score": 0.91, "box": [0, 0, 3, 6]},
+                    {"mask": second, "score": 0.84, "box": [5, 0, 8, 6]},
+                ]
+
+            result = detect_character_instances(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                time_seconds=0.0,
+                concept="person",
+                model_id="facebook/sam3",
+                detector=detector,
+            )
+
+            self.assertEqual(received[0][2:], ("person", "facebook/sam3"))
+            self.assertEqual(len(result["candidates"]), 2)
+            self.assertEqual(result["candidates"][0]["id"], 1)
+            self.assertTrue(result["candidates"][0]["mask_data_url"].startswith("data:image/png;base64,"))
+            self.assertEqual(result["candidates"][1]["box"], [5.0, 0.0, 8.0, 6.0])
+
+    def test_auto_mask_downsizes_large_candidate_payloads_and_boxes_together(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "large.jpg"
+            Image.new("RGB", (1000, 500)).save(media_path)
+            mask = np.ones((500, 1000), dtype=np.uint8)
+
+            result = detect_character_instances(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                time_seconds=0,
+                concept="person",
+                model_id="facebook/sam3",
+                detector=lambda *_args: [
+                    {"mask": mask, "score": 0.95, "box": [100, 50, 900, 450]}
+                ],
+            )
+
+            candidate = result["candidates"][0]
+            encoded = candidate["mask_data_url"].split(",", 1)[1]
+            with Image.open(io.BytesIO(base64.b64decode(encoded))) as decoded:
+                self.assertEqual(decoded.size, (768, 384))
+            self.assertEqual((result["width"], result["height"]), (768, 384))
+            self.assertEqual(candidate["box"], [76.8, 38.4, 691.2, 345.6])
+
     def test_user_can_save_and_reload_speaking_intervals_for_a_dataset_item(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_dir = Path(tmp_dir) / "dataset"
@@ -103,8 +164,8 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
             media_path.touch()
             received = []
 
-            def tracker(path, prompts, _progress):
-                received.append((path, prompts))
+            def tracker(path, prompts, initial_mask, initial_time, _progress):
+                received.append((path, prompts, initial_mask, initial_time))
                 return np.ones((2, 3, 4), dtype=np.uint8)
 
             state = track_character_visual_mask(
@@ -124,8 +185,54 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
 
             self.assertEqual(received[0][0], media_path.resolve())
             self.assertEqual(received[0][1][0]["points"][1]["label"], 0)
+            self.assertIsNone(received[0][2])
             self.assertTrue(state["visual"]["exists"])
             self.assertEqual(state["visual"]["shape"], [2, 3, 4])
+
+    def test_selected_auto_masks_are_combined_and_seed_visual_tracking(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "group.mp4"
+            media_path.touch()
+            left = np.zeros((4, 6), dtype=np.uint8)
+            left[:, :2] = 1
+            right = np.zeros((4, 6), dtype=np.uint8)
+            right[:, 4:] = 1
+            received = []
+
+            def detector(_path, _time, _concept, _model_id, _progress):
+                return [
+                    {"mask": left, "score": 0.9, "box": [0, 0, 2, 4]},
+                    {"mask": right, "score": 0.8, "box": [4, 0, 6, 4]},
+                ]
+
+            candidates = detect_character_instances(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                time_seconds=1.25,
+                concept="person",
+                model_id="facebook/sam3",
+                detector=detector,
+            )["candidates"]
+
+            def tracker(path, prompts, initial_mask, initial_time, _progress):
+                received.append((path, prompts, initial_mask, initial_time))
+                return initial_mask[None]
+
+            state = track_character_visual_mask(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                prompts=[],
+                initial_mask_data_urls=[candidate["mask_data_url"] for candidate in candidates],
+                initial_time_seconds=1.25,
+                tracker=tracker,
+            )
+
+            expected = np.maximum(left, right)
+            np.testing.assert_array_equal(received[0][2], expected)
+            self.assertEqual(received[0][3], 1.25)
+            self.assertTrue(state["visual"]["exists"])
 
     def test_training_finds_a_nested_visual_annotation_created_by_the_ui(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -176,6 +283,30 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
             state = json.loads(completed.stdout.strip().splitlines()[-1])
 
             self.assertEqual(state["audio"]["intervals"], [[0.25, 0.75]])
+
+    def test_ui_script_exposes_supported_character_mask_models(self):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).parents[1] / "ui_scripts" / "character_dop_annotator.py"),
+                "models",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        catalog = json.loads(completed.stdout.strip().splitlines()[-1])
+
+        self.assertEqual(catalog["detectors"][0]["id"], "facebook/sam3")
+        self.assertEqual(
+            [model["id"] for model in catalog["trackers"]],
+            [
+                "facebook/sam2.1-hiera-tiny",
+                "facebook/sam2.1-hiera-small",
+                "facebook/sam2.1-hiera-base-plus",
+                "facebook/sam2.1-hiera-large",
+            ],
+        )
 
     def test_saving_annotations_invalidates_only_that_items_generated_latents(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

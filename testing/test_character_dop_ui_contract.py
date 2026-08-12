@@ -38,6 +38,20 @@ class CharacterDOPUIContractTests(unittest.TestCase):
             "audio cards need a dedicated annotator control so playback remains usable",
         )
 
+    def test_character_annotator_remembers_the_last_sam2_tracker_model(self):
+        source = (
+            Path(__file__).parents[1]
+            / "ui"
+            / "src"
+            / "components"
+            / "CharacterDOPAnnotator.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("CHARACTER_DOP_TRACKER_STORAGE_KEY", source)
+        self.assertIn("localStorage.getItem(CHARACTER_DOP_TRACKER_STORAGE_KEY)", source)
+        self.assertIn("catalog.trackers.some(model => model.id === storedTrackerModel)", source)
+        self.assertIn("localStorage.setItem(CHARACTER_DOP_TRACKER_STORAGE_KEY", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -51,6 +51,7 @@ type DetectionResult = {
 
 const DEFAULT_TRACKER_MODEL = 'facebook/sam2.1-hiera-tiny';
 const DEFAULT_DETECTOR_MODEL = 'facebook/sam3';
+const CHARACTER_DOP_TRACKER_STORAGE_KEY = 'ai-toolkit.character-dop.sam2-tracker-model';
 
 type Props = {
   open: boolean;
@@ -230,7 +231,16 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
         setPrompts(nextState.prompts ?? []);
         setIntervals(nextState.audio?.intervals ?? []);
         setModelCatalog(catalog);
-        setTrackerModel(catalog.defaults.tracker);
+        let preferredTrackerModel = catalog.defaults.tracker;
+        try {
+          const storedTrackerModel = window.localStorage.getItem(CHARACTER_DOP_TRACKER_STORAGE_KEY);
+          if (storedTrackerModel && catalog.trackers.some(model => model.id === storedTrackerModel)) {
+            preferredTrackerModel = storedTrackerModel;
+          }
+        } catch {
+          // Storage may be unavailable in privacy-restricted browser contexts.
+        }
+        setTrackerModel(preferredTrackerModel);
         setDetectorModel(catalog.defaults.detector);
         setConcept(catalog.defaults.concept);
       })
@@ -698,7 +708,15 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                     <select
                       id="character-dop-tracker"
                       value={trackerModel}
-                      onChange={event => setTrackerModel(event.target.value)}
+                      onChange={event => {
+                        const modelId = event.target.value;
+                        setTrackerModel(modelId);
+                        try {
+                          window.localStorage.setItem(CHARACTER_DOP_TRACKER_STORAGE_KEY, modelId);
+                        } catch {
+                          // The selection still applies to this session when storage is unavailable.
+                        }
+                      }}
                       disabled={Boolean(busy)}
                       className="w-full rounded border border-gray-700 bg-gray-900 px-2.5 py-2 text-gray-200"
                     >

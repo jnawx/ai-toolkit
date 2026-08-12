@@ -102,6 +102,8 @@ export const defaultJobConfig: JobConfig = {
           diff_output_preservation_focus_fraction: 0.25,
           diff_output_preservation_visual_multiplier: 1.0,
           diff_output_preservation_audio_multiplier: 1.0,
+          character_training_visual_multiplier: 1.0,
+          character_training_audio_multiplier: 1.0,
           switch_boundary_every: 1,
           loss_type: 'mse',
         },

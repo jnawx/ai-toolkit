@@ -935,7 +935,7 @@ export default function SimpleJob({
                                 />
                                 <NumberInput
                                   label="Character DOP Audio Multiplier"
-                                  className="pt-2 pb-4"
+                                  className="pt-2"
                                   value={
                                     jobConfig.config.process[0].train.diff_output_preservation_audio_multiplier ?? 1
                                   }
@@ -946,6 +946,26 @@ export default function SimpleJob({
                                     )
                                   }
                                   min={0}
+                                />
+                                <NumberInput
+                                  label="Character Visual Training Multiplier"
+                                  docKey="train.character_training_visual_multiplier"
+                                  className="pt-2"
+                                  value={jobConfig.config.process[0].train.character_training_visual_multiplier ?? 1}
+                                  onChange={value =>
+                                    setJobConfig(value, 'config.process[0].train.character_training_visual_multiplier')
+                                  }
+                                  min={1}
+                                />
+                                <NumberInput
+                                  label="Character Audio Training Multiplier"
+                                  docKey="train.character_training_audio_multiplier"
+                                  className="pt-2 pb-4"
+                                  value={jobConfig.config.process[0].train.character_training_audio_multiplier ?? 1}
+                                  onChange={value =>
+                                    setJobConfig(value, 'config.process[0].train.character_training_audio_multiplier')
+                                  }
+                                  min={1}
                                 />
                               </>
                             )}

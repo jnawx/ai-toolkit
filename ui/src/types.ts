@@ -162,6 +162,8 @@ export interface TrainConfig {
   diff_output_preservation_focus_fraction?: number;
   diff_output_preservation_visual_multiplier?: number;
   diff_output_preservation_audio_multiplier?: number;
+  character_training_visual_multiplier?: number;
+  character_training_audio_multiplier?: number;
   blank_prompt_preservation?: boolean;
   blank_prompt_preservation_multiplier?: number;
   switch_boundary_every: number;

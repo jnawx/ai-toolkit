@@ -1,3 +1,4 @@
+import math
 import os
 import time
 from typing import List, Optional, Literal, Tuple, Union, TYPE_CHECKING, Dict
@@ -516,6 +517,25 @@ class TrainConfig:
             raise ValueError("diff_output_preservation_visual_multiplier must be non-negative")
         if self.diff_output_preservation_audio_multiplier < 0.0:
             raise ValueError("diff_output_preservation_audio_multiplier must be non-negative")
+        try:
+            self.character_training_visual_multiplier = float(
+                kwargs.get('character_training_visual_multiplier', 1.0)
+            )
+            self.character_training_audio_multiplier = float(
+                kwargs.get('character_training_audio_multiplier', 1.0)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("character training multipliers must be at least 1") from exc
+        if (
+            not math.isfinite(self.character_training_visual_multiplier)
+            or self.character_training_visual_multiplier < 1.0
+        ):
+            raise ValueError("character_training_visual_multiplier must be at least 1")
+        if (
+            not math.isfinite(self.character_training_audio_multiplier)
+            or self.character_training_audio_multiplier < 1.0
+        ):
+            raise ValueError("character_training_audio_multiplier must be at least 1")
         diff_output_preservation_interval = kwargs.get('diff_output_preservation_every_n_steps', 1)
         try:
             diff_output_preservation_interval = float(diff_output_preservation_interval)

@@ -52,6 +52,22 @@ class CharacterDOPUIContractTests(unittest.TestCase):
         self.assertIn("catalog.trackers.some(model => model.id === storedTrackerModel)", source)
         self.assertIn("localStorage.setItem(CHARACTER_DOP_TRACKER_STORAGE_KEY", source)
 
+    def test_character_dop_form_exposes_positive_visual_and_audio_training_weights(self):
+        source = (
+            Path(__file__).parents[1]
+            / "ui"
+            / "src"
+            / "app"
+            / "jobs"
+            / "new"
+            / "SimpleJob.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('label="Character Visual Training Multiplier"', source)
+        self.assertIn("train.character_training_visual_multiplier", source)
+        self.assertIn('label="Character Audio Training Multiplier"', source)
+        self.assertIn("train.character_training_audio_multiplier", source)
+
 
 if __name__ == "__main__":
     unittest.main()

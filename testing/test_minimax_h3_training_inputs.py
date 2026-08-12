@@ -90,6 +90,19 @@ class MiniMaxH3SharedTrainingInputTests(unittest.TestCase):
 
 
 class MiniMaxH3CharacterDOPRoutingTests(unittest.TestCase):
+    def test_character_training_inputs_reuse_visual_masks_and_mapped_speech(self):
+        h3 = MinimaxH3Model.__new__(MinimaxH3Model)
+        batch = _Batch()
+        batch.character_dop_visual_mask_tensor = torch.ones((1, 1, 1, 1))
+        batch.file_items[0].character_dop_audio_intervals = [(11.0, 13.0)]
+        batch.file_items[0].audio_segment = AudioSegment(10.0, 10.0, 5.0)
+
+        inputs = h3.get_character_training_inputs(batch=batch)
+
+        self.assertIs(inputs["visual_character_mask"], batch.character_dop_visual_mask_tensor)
+        self.assertEqual(inputs["audio_character_intervals"], [[(0.5, 1.5)]])
+        self.assertEqual(inputs["audio_latents_per_second"], 40)
+
     def test_joint_video_audio_routes_primary_predictions_and_speaking_intervals(self):
         h3 = MinimaxH3Model.__new__(MinimaxH3Model)
         batch = _Batch()

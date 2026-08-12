@@ -221,6 +221,42 @@ def _visual_preservation_weights(
     return 1.0 - mask[:, 0]
 
 
+def apply_character_training_weight(
+    element_loss: torch.Tensor,
+    *,
+    modality: CharacterDOPModality,
+    multiplier: float,
+    character_mask: Optional[torch.Tensor] = None,
+    audio_character_intervals: Optional[AudioIntervals] = None,
+    audio_latents_per_second: int = 40,
+) -> torch.Tensor:
+    """Upweight ordinary loss inside an annotated character region."""
+    if not math.isfinite(multiplier) or multiplier < 1.0:
+        raise ValueError("character training multiplier must be at least 1")
+    if multiplier == 1.0:
+        return element_loss
+    if modality == "visual":
+        if character_mask is None:
+            return element_loss
+        if element_loss.ndim not in (4, 5):
+            raise ValueError("visual character training expects BCHW or BCTHW losses")
+        token_loss = element_loss.mean(dim=1)
+        positive_mask = 1.0 - _visual_preservation_weights(character_mask, token_loss)
+        weights = 1.0 + positive_mask * (float(multiplier) - 1.0)
+        return element_loss * weights.unsqueeze(1).to(element_loss.dtype)
+    if modality == "audio":
+        if audio_character_intervals is None:
+            return element_loss
+        positive_mask = audio_character_mask_from_intervals(
+            element_loss,
+            audio_character_intervals,
+            latents_per_second=audio_latents_per_second,
+        )
+        weights = 1.0 + positive_mask * (float(multiplier) - 1.0)
+        return element_loss * weights.unsqueeze(-1).to(element_loss.dtype)
+    raise ValueError(f"unsupported character training modality: {modality}")
+
+
 def _focused_token_mean(
     token_error: torch.Tensor,
     focus_fraction: float,

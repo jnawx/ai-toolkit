@@ -921,21 +921,23 @@ class MinimaxH3Model(BaseModel):
         # The H3 head predicts clean - noise; ai-toolkit trains noise - clean.
         return -audio_pred
 
-    def get_character_dop_inputs(
+    def get_character_training_inputs(
         self,
         *,
         batch: "DataLoaderBatchDTO",
-        primary_prediction: torch.Tensor,
-        preservation_prediction: torch.Tensor,
-        prior_prediction: torch.Tensor,
+        include_audio: bool = True,
     ) -> dict:
-        """Route H3's joint predictions into modality-aware character DOP."""
+        """Return H3 character annotations aligned to the current training clip."""
         is_audio_only = batch.dataset_config.is_audio_only
         audio_character_intervals = None
-        raw_audio_intervals = [
-            getattr(file_item, "character_dop_audio_intervals", None)
-            for file_item in batch.file_items
-        ]
+        raw_audio_intervals = (
+            [
+                getattr(file_item, "character_dop_audio_intervals", None)
+                for file_item in batch.file_items
+            ]
+            if include_audio
+            else []
+        )
         audio_character_mask_present = None
         if any(intervals is not None for intervals in raw_audio_intervals):
             audio_character_mask_present = [
@@ -962,6 +964,29 @@ class MinimaxH3Model(BaseModel):
                 )
 
         return {
+            "visual_character_mask": (
+                None if is_audio_only else batch.character_dop_visual_mask_tensor
+            ),
+            "visual_character_mask_present": (
+                None if is_audio_only else batch.character_dop_visual_mask_present
+            ),
+            "audio_character_intervals": audio_character_intervals,
+            "audio_character_mask_present": audio_character_mask_present,
+            "audio_latents_per_second": packing.AUDIO_LATENTS_PER_SECOND,
+        }
+
+    def get_character_dop_inputs(
+        self,
+        *,
+        batch: "DataLoaderBatchDTO",
+        primary_prediction: torch.Tensor,
+        preservation_prediction: torch.Tensor,
+        prior_prediction: torch.Tensor,
+    ) -> dict:
+        """Route H3's joint predictions into modality-aware character DOP."""
+        is_audio_only = batch.dataset_config.is_audio_only
+        training_inputs = self.get_character_training_inputs(batch=batch)
+        return {
             "visual_prediction": None if is_audio_only else preservation_prediction,
             "visual_primary_prediction": None if is_audio_only else primary_prediction,
             "visual_prior": None if is_audio_only else prior_prediction,
@@ -972,15 +997,11 @@ class MinimaxH3Model(BaseModel):
                 primary_prediction if is_audio_only else batch.audio_pred
             ),
             "audio_prior": prior_prediction if is_audio_only else batch.audio_pred_prior,
-            "audio_character_intervals": audio_character_intervals,
-            "audio_character_mask_present": audio_character_mask_present,
-            "audio_latents_per_second": packing.AUDIO_LATENTS_PER_SECOND,
-            "character_mask": (
-                None if is_audio_only else batch.character_dop_visual_mask_tensor
-            ),
-            "visual_character_mask_present": (
-                None if is_audio_only else batch.character_dop_visual_mask_present
-            ),
+            "audio_character_intervals": training_inputs["audio_character_intervals"],
+            "audio_character_mask_present": training_inputs["audio_character_mask_present"],
+            "audio_latents_per_second": training_inputs["audio_latents_per_second"],
+            "character_mask": training_inputs["visual_character_mask"],
+            "visual_character_mask_present": training_inputs["visual_character_mask_present"],
         }
 
     def get_noise_prediction(

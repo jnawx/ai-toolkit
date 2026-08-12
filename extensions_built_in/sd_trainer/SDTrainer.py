@@ -41,7 +41,7 @@ from toolkit.unloader import unload_text_encoder
 from PIL import Image
 from torchvision.transforms import functional as TF
 from toolkit.basic import flush
-from toolkit.character_dop import character_dop_losses
+from toolkit.character_dop import apply_character_training_weight, character_dop_losses
 
 
 adapter_transforms = transforms.Compose([
@@ -938,6 +938,42 @@ class SDTrainer(BaseSDTrainProcess):
             # resize to the size of the loss
             mask_multiplier = torch.nn.functional.interpolate(mask_multiplier, size=(pred.shape[2], pred.shape[3]), mode='nearest')
 
+        character_training_inputs = None
+        train_character_visual = (
+            not batch.dataset_config.is_audio_only
+            and self.train_config.character_training_visual_multiplier > 1.0
+        )
+        train_character_audio = (
+            self.train_config.character_training_audio_multiplier > 1.0
+            and (batch.dataset_config.is_audio_only or batch.audio_pred is not None)
+        )
+        use_character_training = (
+            self.train_config.diff_output_preservation
+            and self.train_config.diff_output_preservation_mode == 'character'
+            and hasattr(self.sd, 'get_character_training_inputs')
+            and (train_character_visual or train_character_audio)
+        )
+        if use_character_training:
+            character_training_inputs = self.sd.get_character_training_inputs(
+                batch=batch,
+                include_audio=train_character_audio,
+            )
+            if batch.dataset_config.is_audio_only and train_character_audio:
+                loss = apply_character_training_weight(
+                    loss,
+                    modality='audio',
+                    multiplier=self.train_config.character_training_audio_multiplier,
+                    audio_character_intervals=character_training_inputs['audio_character_intervals'],
+                    audio_latents_per_second=character_training_inputs['audio_latents_per_second'],
+                )
+            elif train_character_visual:
+                loss = apply_character_training_weight(
+                    loss,
+                    modality='visual',
+                    multiplier=self.train_config.character_training_visual_multiplier,
+                    character_mask=character_training_inputs['visual_character_mask'],
+                )
+
         # multiply by our mask
         try:
             if len(noise_pred.shape) == 5:
@@ -999,7 +1035,18 @@ class SDTrainer(BaseSDTrainProcess):
         
         # check for audio loss
         if batch.audio_pred is not None and batch.audio_target is not None:
-            audio_loss = torch.nn.functional.mse_loss(batch.audio_pred.float(), batch.audio_target.float(), reduction="mean")
+            audio_loss = torch.nn.functional.mse_loss(
+                batch.audio_pred.float(), batch.audio_target.float(), reduction="none"
+            )
+            if character_training_inputs is not None and train_character_audio:
+                audio_loss = apply_character_training_weight(
+                    audio_loss,
+                    modality='audio',
+                    multiplier=self.train_config.character_training_audio_multiplier,
+                    audio_character_intervals=character_training_inputs['audio_character_intervals'],
+                    audio_latents_per_second=character_training_inputs['audio_latents_per_second'],
+                )
+            audio_loss = audio_loss.mean()
             audio_loss = audio_loss * self.train_config.audio_loss_multiplier
             loss = loss + audio_loss
 

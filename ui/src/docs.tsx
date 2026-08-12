@@ -293,9 +293,10 @@ const docs: { [key: string]: ConfigDoc } = {
       <>
         Optional folder of JSON sidecars for MiniMax-H3 Character LoRA DOP. Each media file uses a matching sidecar,
         such as scene.mp4 and scene.json. The JSON must contain character_intervals as source-time pairs in seconds, for
-        example {`{"character_intervals": [[0.4, 1.8], [3.1, 4.0]]}`}. During those intervals the trigger may change
-        the voice; outside them, the trigger-conditioned audio is constrained to the base model to protect other
-        speakers. Intervals are automatically clipped and remapped when a training clip is trimmed or time-stretched.
+        example {`{"character_intervals": [[0.4, 1.8], [3.1, 4.0]]}`}. During those intervals the trigger may change the
+        voice; outside them, the trigger-conditioned audio is constrained to the base model to protect other speakers.
+        The optional Character Audio Training Multiplier also uses these intervals to strengthen ordinary voice
+        learning. Intervals are automatically clipped and remapped when a training clip is trimmed or time-stretched.
       </>
     ),
   },
@@ -304,8 +305,9 @@ const docs: { [key: string]: ConfigDoc } = {
     description: (
       <>
         Optional folder of positive character masks for MiniMax-H3 Character LoRA DOP. Image masks use matching image
-        files; video masks use matching THW NumPy files. These masks affect only preservation outside the target
-        character and never replace the dataset&apos;s ordinary training-loss mask.
+        files; video masks use matching THW NumPy files. These masks preserve outside the target character and, when the
+        Character Visual Training Multiplier is above 1, strengthen ordinary training inside it. They remain separate
+        from and never replace the dataset&apos;s ordinary training-loss mask.
       </>
     ),
   },
@@ -336,6 +338,27 @@ const docs: { [key: string]: ConfigDoc } = {
         The fraction of visual or audio tokens with the largest counterfactual drift that contribute to character DOP.
         Lower values concentrate preservation on localized face, body, or voice leakage. A value of 1 uses every token;
         0.25 is the recommended starting point.
+      </>
+    ),
+  },
+  'train.character_training_visual_multiplier': {
+    title: 'Character Visual Training Multiplier',
+    description: (
+      <>
+        Upweights ordinary visual training loss inside an annotated Character DOP mask. The unmasked scene keeps its
+        normal 1x training weight, and Character DOP continues to preserve it separately. A value of 1 disables this
+        positive focus; 2 is the recommended first experiment when masks prevent bleed but likeness remains weak. Files
+        without a visual character annotation keep their existing training loss unchanged.
+      </>
+    ),
+  },
+  'train.character_training_audio_multiplier': {
+    title: 'Character Audio Training Multiplier',
+    description: (
+      <>
+        Upweights ordinary MiniMax-H3 audio training loss during annotated character-speaking intervals. Other speakers
+        and unmarked audio keep their normal 1x training weight, while Character DOP preserves them separately. A value
+        of 1 disables this positive focus. Files without speaking annotations keep their existing audio loss unchanged.
       </>
     ),
   },

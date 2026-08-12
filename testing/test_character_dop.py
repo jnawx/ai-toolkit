@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 
 from toolkit.character_dop import (
+    apply_character_training_weight,
     character_dop_loss,
     character_dop_losses,
     character_dop_multiplier,
@@ -25,6 +26,27 @@ from toolkit.data_transfer_object.data_loader import DataLoaderBatchDTO
 
 
 class CharacterDOPVisualLossTests(unittest.TestCase):
+    def test_character_training_weight_upweights_only_the_masked_visual_region(self):
+        element_loss = torch.ones((1, 2, 1, 2, 2), dtype=torch.float32)
+        character_mask = torch.tensor(
+            [[[[1.0, 0.0], [0.5, 0.0]]]], dtype=torch.float32
+        )
+
+        weighted = apply_character_training_weight(
+            element_loss,
+            modality="visual",
+            multiplier=3.0,
+            character_mask=character_mask,
+        )
+
+        expected_spatial_weights = torch.tensor(
+            [[[[3.0, 1.0], [2.0, 1.0]]]], dtype=torch.float32
+        )
+        torch.testing.assert_close(
+            weighted,
+            expected_spatial_weights.unsqueeze(1).expand_as(element_loss),
+        )
+
     def test_character_masks_collate_separately_from_ordinary_loss_masks(self):
         dataset_config = types.SimpleNamespace(
             load_image_when_caching_latents=False,
@@ -176,6 +198,25 @@ class CharacterDOPVisualLossTests(unittest.TestCase):
 
 
 class CharacterDOPAudioLossTests(unittest.TestCase):
+    def test_character_training_weight_upweights_only_annotated_speech(self):
+        element_loss = torch.ones((1, 4, 2), dtype=torch.float32)
+
+        weighted = apply_character_training_weight(
+            element_loss,
+            modality="audio",
+            multiplier=2.0,
+            audio_character_intervals=[[(0.0, 1.0)]],
+            audio_latents_per_second=1,
+        )
+
+        expected_row_weights = torch.tensor(
+            [[[2.0], [1.0], [2.0], [1.0]]], dtype=torch.float32
+        )
+        torch.testing.assert_close(
+            weighted,
+            expected_row_weights.expand_as(element_loss),
+        )
+
     def test_audio_loss_focuses_on_the_largest_temporal_drift(self):
         prior = torch.zeros((1, 4, 2), dtype=torch.float32)
         prediction = torch.tensor(
@@ -341,6 +382,8 @@ class CharacterDOPConfigTests(unittest.TestCase):
         self.assertEqual(config.diff_output_preservation_focus_fraction, 0.25)
         self.assertEqual(config.diff_output_preservation_visual_multiplier, 1.0)
         self.assertEqual(config.diff_output_preservation_audio_multiplier, 1.0)
+        self.assertEqual(config.character_training_visual_multiplier, 1.0)
+        self.assertEqual(config.character_training_audio_multiplier, 1.0)
 
     def test_standard_mode_remains_the_default(self):
         config = TrainConfig()
@@ -352,6 +395,26 @@ class CharacterDOPConfigTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "focus_fraction"):
                     TrainConfig(diff_output_preservation_focus_fraction=value)
+
+    def test_character_training_multipliers_cannot_downweight_the_character(self):
+        for key in (
+            "character_training_visual_multiplier",
+            "character_training_audio_multiplier",
+        ):
+            for value in (0.5, float("nan"), float("inf"), float("-inf")):
+                with self.subTest(key=key, value=value):
+                    with self.assertRaisesRegex(ValueError, key):
+                        TrainConfig(**{key: value})
+
+    def test_character_training_weight_rejects_non_finite_multiplier(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "at least 1"):
+                    apply_character_training_weight(
+                        torch.ones((1, 1, 1, 1)),
+                        modality="visual",
+                        multiplier=value,
+                    )
 
     def test_character_mode_is_restricted_to_minimax_h3(self):
         train = TrainConfig(diff_output_preservation_mode="character")
@@ -406,6 +469,225 @@ class CharacterDOPConfigTests(unittest.TestCase):
             self.assertIsNone(dataset.mask_path)
             self.assertEqual(dataset.character_dop_visual_mask_path, str(visual_dir))
             self.assertEqual(dataset.character_dop_audio_mask_path, str(audio_dir))
+
+
+class CharacterTrainingIntegrationTests(unittest.TestCase):
+    def test_default_training_multipliers_do_not_touch_character_annotations(self):
+        from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
+
+        class FakeModel:
+            is_flow_matching = True
+            prediction_type = "epsilon"
+            x0_pred = False
+
+            @staticmethod
+            def get_loss_target(**kwargs):
+                return torch.zeros_like(kwargs["noise"])
+
+            @staticmethod
+            def scale_loss(loss):
+                return loss
+
+            @staticmethod
+            def get_character_training_inputs(**_kwargs):
+                raise AssertionError("1x character training must remain a no-op")
+
+        batch = types.SimpleNamespace(
+            get_is_reg_list=lambda: [False],
+            loss_multiplier_list=[1.0],
+            mask_tensor=None,
+            latents=torch.zeros((1, 1, 1, 1)),
+            dataset_config=types.SimpleNamespace(is_audio_only=False),
+            sigmas=None,
+            audio_pred=None,
+            audio_target=None,
+        )
+        trainer = SDTrainer.__new__(SDTrainer)
+        trainer.train_config = TrainConfig(
+            diff_output_preservation=True,
+            diff_output_preservation_mode="character",
+        )
+        trainer.device_torch = torch.device("cpu")
+        trainer.sd = FakeModel()
+        trainer.dfe = None
+        trainer.adapter = None
+
+        loss = trainer.calculate_loss(
+            noise_pred=torch.ones((1, 1, 1, 1)),
+            noise=torch.zeros((1, 1, 1, 1)),
+            noisy_latents=torch.zeros((1, 1, 1, 1)),
+            timesteps=torch.tensor([500.0]),
+            batch=batch,
+        )
+
+        self.assertEqual(loss.item(), 1.0)
+
+    def test_trainer_applies_visual_character_weight_before_reduction(self):
+        from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
+
+        character_mask = torch.tensor([[[[1.0, 0.0]]]], dtype=torch.float32)
+
+        class FakeModel:
+            is_flow_matching = True
+            prediction_type = "epsilon"
+            x0_pred = False
+
+            @staticmethod
+            def get_loss_target(**kwargs):
+                return torch.zeros_like(kwargs["noise"])
+
+            @staticmethod
+            def scale_loss(loss):
+                return loss
+
+            @staticmethod
+            def get_character_training_inputs(**_kwargs):
+                return {
+                    "visual_character_mask": character_mask,
+                    "audio_character_intervals": None,
+                    "audio_latents_per_second": 40,
+                }
+
+        batch = types.SimpleNamespace(
+            get_is_reg_list=lambda: [False],
+            loss_multiplier_list=[1.0],
+            mask_tensor=None,
+            latents=torch.zeros((1, 1, 1, 2)),
+            dataset_config=types.SimpleNamespace(is_audio_only=False),
+            sigmas=None,
+            audio_pred=None,
+            audio_target=None,
+        )
+        trainer = SDTrainer.__new__(SDTrainer)
+        trainer.train_config = TrainConfig(
+            diff_output_preservation=True,
+            diff_output_preservation_mode="character",
+            character_training_visual_multiplier=3.0,
+        )
+        trainer.device_torch = torch.device("cpu")
+        trainer.sd = FakeModel()
+        trainer.dfe = None
+        trainer.adapter = None
+
+        loss = trainer.calculate_loss(
+            noise_pred=torch.tensor([[[[2.0, 1.0]]]], dtype=torch.float32),
+            noise=torch.zeros((1, 1, 1, 2), dtype=torch.float32),
+            noisy_latents=torch.zeros((1, 1, 1, 2), dtype=torch.float32),
+            timesteps=torch.tensor([500.0]),
+            batch=batch,
+        )
+
+        self.assertEqual(loss.item(), 6.5)
+
+    def test_trainer_applies_audio_character_weight_to_joint_h3_loss(self):
+        from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
+
+        class FakeModel:
+            is_flow_matching = True
+            prediction_type = "epsilon"
+            x0_pred = False
+
+            @staticmethod
+            def get_loss_target(**kwargs):
+                return torch.zeros_like(kwargs["noise"])
+
+            @staticmethod
+            def scale_loss(loss):
+                return loss
+
+            @staticmethod
+            def get_character_training_inputs(**_kwargs):
+                return {
+                    "visual_character_mask": None,
+                    "audio_character_intervals": [[(0.0, 1.0)]],
+                    "audio_latents_per_second": 1,
+                }
+
+        batch = types.SimpleNamespace(
+            get_is_reg_list=lambda: [False],
+            loss_multiplier_list=[1.0],
+            mask_tensor=None,
+            latents=torch.zeros((1, 1, 1, 1)),
+            dataset_config=types.SimpleNamespace(is_audio_only=False),
+            sigmas=None,
+            audio_pred=torch.tensor([[[2.0], [1.0], [2.0], [1.0]]]),
+            audio_target=torch.zeros((1, 4, 1)),
+        )
+        trainer = SDTrainer.__new__(SDTrainer)
+        trainer.train_config = TrainConfig(
+            diff_output_preservation=True,
+            diff_output_preservation_mode="character",
+            character_training_audio_multiplier=2.0,
+        )
+        trainer.device_torch = torch.device("cpu")
+        trainer.sd = FakeModel()
+        trainer.dfe = None
+        trainer.adapter = None
+
+        loss = trainer.calculate_loss(
+            noise_pred=torch.zeros((1, 1, 1, 1)),
+            noise=torch.zeros((1, 1, 1, 1)),
+            noisy_latents=torch.zeros((1, 1, 1, 1)),
+            timesteps=torch.tensor([500.0]),
+            batch=batch,
+        )
+
+        self.assertEqual(loss.item(), 4.5)
+
+    def test_trainer_applies_audio_character_weight_to_audio_only_h3_loss(self):
+        from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
+
+        class FakeModel:
+            is_flow_matching = True
+            prediction_type = "epsilon"
+            x0_pred = False
+
+            @staticmethod
+            def get_loss_target(**kwargs):
+                return torch.zeros_like(kwargs["noise"])
+
+            @staticmethod
+            def scale_loss(loss):
+                return loss
+
+            @staticmethod
+            def get_character_training_inputs(**_kwargs):
+                return {
+                    "visual_character_mask": None,
+                    "audio_character_intervals": [[(0.0, 1.0)]],
+                    "audio_latents_per_second": 1,
+                }
+
+        batch = types.SimpleNamespace(
+            get_is_reg_list=lambda: [False],
+            loss_multiplier_list=[1.0],
+            mask_tensor=None,
+            latents=torch.zeros((1, 4, 1)),
+            dataset_config=types.SimpleNamespace(is_audio_only=True),
+            sigmas=None,
+            audio_pred=None,
+            audio_target=None,
+        )
+        trainer = SDTrainer.__new__(SDTrainer)
+        trainer.train_config = TrainConfig(
+            diff_output_preservation=True,
+            diff_output_preservation_mode="character",
+            character_training_audio_multiplier=2.0,
+        )
+        trainer.device_torch = torch.device("cpu")
+        trainer.sd = FakeModel()
+        trainer.dfe = None
+        trainer.adapter = None
+
+        loss = trainer.calculate_loss(
+            noise_pred=torch.tensor([[[2.0], [1.0], [2.0], [1.0]]]),
+            noise=torch.zeros((1, 4, 1)),
+            noisy_latents=torch.zeros((1, 4, 1)),
+            timesteps=torch.tensor([500.0]),
+            batch=batch,
+        )
+
+        self.assertEqual(loss.item(), 4.5)
 
 
 if __name__ == "__main__":

@@ -2206,6 +2206,7 @@ class SDTrainer(BaseSDTrainProcess):
                             is_audio_only = batch.dataset_config.is_audio_only
                             character_losses = character_dop_losses(
                                 visual_prediction=None if is_audio_only else preservation_pred,
+                                visual_primary_prediction=None if is_audio_only else noise_pred,
                                 visual_prior=None if is_audio_only else prior_pred,
                                 audio_prediction=(
                                     preservation_pred if is_audio_only

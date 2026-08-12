@@ -128,6 +128,7 @@ def character_dop_loss(
 def character_dop_losses(
     *,
     visual_prediction: Optional[torch.Tensor] = None,
+    visual_primary_prediction: Optional[torch.Tensor] = None,
     visual_prior: Optional[torch.Tensor] = None,
     audio_prediction: Optional[torch.Tensor] = None,
     audio_prior: Optional[torch.Tensor] = None,
@@ -138,7 +139,14 @@ def character_dop_losses(
     audio_multiplier: float,
     character_mask: Optional[torch.Tensor] = None,
 ) -> CharacterDOPLosses:
-    """Build interval-compensated visual and audio character DOP losses."""
+    """Build interval-compensated visual and audio character DOP losses.
+
+    With a character mask, visual preservation compares the trigger-conditioned
+    primary prediction to the base-model class prior outside the mask. This is
+    the direct anti-bleed constraint: the trigger may change the character, but
+    not other people or the scene. Without a mask, the counterfactual class
+    prediction is used so the character itself remains learnable.
+    """
     if (visual_prediction is None) != (visual_prior is None):
         raise ValueError("visual character DOP requires both prediction and prior")
     if (audio_prediction is None) != (audio_prior is None):
@@ -152,8 +160,13 @@ def character_dop_losses(
     )
     visual_loss = None
     if visual_prediction is not None:
+        visual_prediction_to_preserve = (
+            visual_primary_prediction
+            if character_mask is not None and visual_primary_prediction is not None
+            else visual_prediction
+        )
         visual_loss = character_dop_loss(
-            visual_prediction,
+            visual_prediction_to_preserve,
             visual_prior,
             modality="visual",
             focus_fraction=focus_fraction,

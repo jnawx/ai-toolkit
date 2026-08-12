@@ -281,6 +281,11 @@ class DataLoaderBatchDTO:
             # prediction. Secondary passes (cfg / guidance loss / prior preds)
             # reuse it so their noisy audio matches the stored audio_target.
             self.audio_noise: Union[torch.Tensor, None] = None
+            # MiniMax H3 jointly attends auxiliary audio and i2v conditioning
+            # rows. Preserve their random inputs across prior, primary, and
+            # counterfactual passes so output comparisons isolate LoRA drift.
+            self.h3_silent_audio_noise: Union[torch.Tensor, None] = None
+            self.h3_i2v_conditioning_noise: Union[torch.Tensor, None] = None
             # audio predictions from the non primary passes. Kept separate so
             # they cannot stomp the primary pred we backprop through.
             self.audio_pred_uncond: Union[torch.Tensor, None] = None
@@ -608,6 +613,8 @@ class DataLoaderBatchDTO:
         del self.audio_target
         del self.audio_pred
         del self.audio_noise
+        del self.h3_silent_audio_noise
+        del self.h3_i2v_conditioning_noise
         del self.audio_pred_uncond
         del self.audio_pred_prior
         del self.audio_pred_preservation

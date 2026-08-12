@@ -984,7 +984,15 @@ class MinimaxH3Model(BaseModel):
                     )
                 if first_latents.ndim == 4:
                     first_latents = first_latents.unsqueeze(2)
-                cond_noise = torch.randn_like(first_latents)
+                cond_noise = getattr(batch, "h3_i2v_conditioning_noise", None)
+                if cond_noise is None or cond_noise.shape != first_latents.shape:
+                    cond_noise = torch.randn_like(first_latents)
+                    batch.h3_i2v_conditioning_noise = cond_noise
+                else:
+                    cond_noise = cond_noise.to(
+                        device=first_latents.device,
+                        dtype=first_latents.dtype,
+                    )
                 first_latents = (
                     KEYFRAME_NOISE_AUG_T * first_latents
                     + (1.0 - KEYFRAME_NOISE_AUG_T) * cond_noise
@@ -1055,13 +1063,29 @@ class MinimaxH3Model(BaseModel):
             else:
                 # no soundtrack: silence (zeros) noised at the audio sigma
                 # rides along without contributing to the loss
-                audio_rows = sa * torch.randn(
+                silent_audio_shape = (
                     batch_size,
                     a_lat * packing.AUDIO_CHANNELS,
                     32,
-                    device=device,
-                    dtype=torch.float32,
                 )
+                silent_audio_noise = getattr(batch, "h3_silent_audio_noise", None)
+                if (
+                    silent_audio_noise is None
+                    or silent_audio_noise.shape != silent_audio_shape
+                ):
+                    silent_audio_noise = torch.randn(
+                        silent_audio_shape,
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                    if batch is not None:
+                        batch.h3_silent_audio_noise = silent_audio_noise
+                else:
+                    silent_audio_noise = silent_audio_noise.to(
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                audio_rows = sa * silent_audio_noise
 
             # --- packed layout (per item: text lengths differ) --------------
             layouts = []

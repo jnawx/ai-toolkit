@@ -7,7 +7,13 @@ from toolkit.character_dop import (
     character_dop_losses,
     character_dop_multiplier,
 )
-from toolkit.config_modules import TrainConfig
+from toolkit.config_modules import (
+    DatasetConfig,
+    ModelConfig,
+    SaveConfig,
+    TrainConfig,
+    validate_configs,
+)
 
 
 class CharacterDOPVisualLossTests(unittest.TestCase):
@@ -103,6 +109,21 @@ class CharacterDOPScheduleTests(unittest.TestCase):
         self.assertEqual(losses.audio.item(), 108.0)
         self.assertEqual(losses.total.item(), 140.0)
 
+    def test_character_mask_binds_primary_trigger_effect_to_the_mask(self):
+        losses = character_dop_losses(
+            visual_prediction=torch.full((1, 1, 1, 1, 2), 2.0),
+            visual_primary_prediction=torch.tensor([[[[[10.0, 5.0]]]]]),
+            visual_prior=torch.zeros((1, 1, 1, 1, 2)),
+            focus_fraction=1.0,
+            base_multiplier=1.0,
+            every_n_steps=1,
+            visual_multiplier=1.0,
+            audio_multiplier=1.0,
+            character_mask=torch.tensor([[[[1.0, 0.0]]]]),
+        )
+
+        self.assertEqual(losses.visual.item(), 25.0)
+
 
 class CharacterDOPConfigTests(unittest.TestCase):
     def test_character_mode_has_modality_specific_defaults(self):
@@ -123,6 +144,14 @@ class CharacterDOPConfigTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "focus_fraction"):
                     TrainConfig(diff_output_preservation_focus_fraction=value)
+
+    def test_character_mode_is_restricted_to_minimax_h3(self):
+        train = TrainConfig(diff_output_preservation_mode="character")
+        model = ModelConfig(name_or_path="unused", arch="flux")
+        dataset = DatasetConfig(folder_path="unused", resolution=[512])
+
+        with self.assertRaisesRegex(ValueError, "MiniMax-H3"):
+            validate_configs(train, model, SaveConfig(), [dataset])
 
 
 if __name__ == "__main__":

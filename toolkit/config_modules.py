@@ -1530,6 +1530,14 @@ def validate_configs(
     save_config: SaveConfig,
     dataset_configs: List[DatasetConfig]
 ):
+    if (
+        train_config.diff_output_preservation_mode == 'character'
+        and model_config.arch != 'minimax_h3'
+    ):
+        raise ValueError(
+            "Character LoRA DOP is currently supported only by MiniMax-H3"
+        )
+
     audio_only_datasets = [dataset for dataset in dataset_configs if dataset.is_audio_only]
     if audio_only_datasets:
         if model_config.arch != 'minimax_h3':

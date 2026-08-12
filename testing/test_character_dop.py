@@ -95,6 +95,20 @@ class CharacterDOPVisualLossTests(unittest.TestCase):
         self.assertEqual(mask[:, 0].sum().item(), 0.0)
         self.assertEqual(mask[:, 1].sum().item(), 4.0)
 
+    def test_temporal_masks_reject_legacy_caches_without_frame_indices(self):
+        source_mask = torch.zeros((3, 2, 2), dtype=torch.float32)
+
+        with self.assertRaisesRegex(ValueError, "rebuild.*latent cache"):
+            prepare_temporal_character_mask(
+                source_mask,
+                frame_indices=None,
+                scale_size=(2, 2),
+                crop=(0, 0, 2, 2),
+                flip_x=False,
+                flip_y=False,
+                min_value=0.0,
+            )
+
 
 class CharacterDOPAudioLossTests(unittest.TestCase):
     def test_audio_loss_focuses_on_the_largest_temporal_drift(self):
@@ -232,8 +246,21 @@ class CharacterDOPConfigTests(unittest.TestCase):
             character_dop_audio_mask_path="intervals",
         )
 
-        with self.assertRaisesRegex(ValueError, "do_audio"):
+        with self.assertRaisesRegex(ValueError, "audio-enabled"):
             validate_configs(train, model, SaveConfig(), [dataset])
+
+    def test_speaking_masks_accept_a_preprocessed_audio_only_dataset(self):
+        train = TrainConfig(diff_output_preservation_mode="character")
+        model = ModelConfig(name_or_path="unused", arch="minimax_h3")
+        dataset = DatasetConfig(
+            folder_path="unused",
+            resolution=768,
+            do_audio=False,
+            is_audio_only=True,
+            character_dop_audio_mask_path="intervals",
+        )
+
+        validate_configs(train, model, SaveConfig(), [dataset])
 
 
 if __name__ == "__main__":

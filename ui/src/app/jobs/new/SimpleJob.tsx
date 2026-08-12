@@ -1399,7 +1399,7 @@ export default function SimpleJob({
                         )}
                         {jobConfig.config.process[0].model.arch === 'minimax_h3' &&
                           jobConfig.config.process[0].train.diff_output_preservation_mode === 'character' &&
-                          dataset.do_audio && (
+                          (dataset.do_audio || isAudioOnlyDataset(dataset)) && (
                             <TextInput
                               label="Character Speaking Masks"
                               value={dataset.character_dop_audio_mask_path ?? ''}

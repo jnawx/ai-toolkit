@@ -1547,9 +1547,9 @@ def validate_configs(
                 raise ValueError(
                     "character_dop_audio_mask_path requires character DOP mode"
                 )
-            if not dataset.do_audio:
+            if not (dataset.do_audio or dataset.is_audio_only):
                 raise ValueError(
-                    "character_dop_audio_mask_path requires do_audio on the dataset"
+                    "character_dop_audio_mask_path requires an audio-enabled dataset"
                 )
 
     audio_only_datasets = [dataset for dataset in dataset_configs if dataset.is_audio_only]

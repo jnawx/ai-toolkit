@@ -1592,9 +1592,10 @@ class MaskFileItemDTOMixin:
     def load_mask_image(self: 'FileItemDTO'):
         if os.path.splitext(self.mask_path)[1].lower() == '.npy':
             source_mask = torch.from_numpy(np.load(self.mask_path))
+            frame_indices = getattr(self, 'video_frames_to_extract', None)
             self.mask_tensor = prepare_temporal_character_mask(
                 source_mask,
-                frame_indices=getattr(self, 'video_frames_to_extract', None),
+                frame_indices=frame_indices,
                 scale_size=(self.scale_to_width, self.scale_to_height),
                 crop=(self.crop_x, self.crop_y, self.crop_width, self.crop_height),
                 flip_x=self.flip_x,
@@ -1920,6 +1921,11 @@ class LatentCachingFileItemDTOMixin:
                 )
             if 'num_frames' in state_dict:
                 self.num_frames = int(state_dict['num_frames'].item())
+            if 'video_frame_indices' in state_dict:
+                self.video_frames_to_extract = [
+                    int(frame_index)
+                    for frame_index in state_dict['video_frame_indices'].tolist()
+                ]
             if 'tensor' in state_dict:
                 self._cached_tensor_uint8 = state_dict['tensor']
             if 'waveform' in state_dict:
@@ -2040,6 +2046,20 @@ class LatentCachingMixin:
                     file_item._cached_first_frame_latent = cached_first_frame.to('cpu', dtype=self.sd.torch_dtype)
                 if 'audio_latent' in state_dict:
                     file_item._cached_audio_latent = state_dict['audio_latent'].to('cpu', dtype=self.sd.torch_dtype)
+                if 'audio_segment' in state_dict:
+                    audio_segment = state_dict['audio_segment'].to(torch.float64).tolist()
+                    file_item.audio_segment = AudioSegment(
+                        start_seconds=float(audio_segment[0]),
+                        duration_seconds=float(audio_segment[1]),
+                        target_duration_seconds=float(audio_segment[2]),
+                    )
+                if 'num_frames' in state_dict:
+                    file_item.num_frames = int(state_dict['num_frames'].item())
+                if 'video_frame_indices' in state_dict:
+                    file_item.video_frames_to_extract = [
+                        int(frame_index)
+                        for frame_index in state_dict['video_frame_indices'].tolist()
+                    ]
                 if 'tensor' in state_dict:
                     file_item._cached_tensor_uint8 = state_dict['tensor']
                 if 'waveform' in state_dict:
@@ -2128,6 +2148,12 @@ class LatentCachingMixin:
 
             if is_video:
                 state_dict['num_frames'] = torch.tensor(file_item.num_frames, dtype=torch.int32)
+                video_frame_indices = getattr(file_item, 'video_frames_to_extract', None)
+                if video_frame_indices is not None:
+                    state_dict['video_frame_indices'] = torch.tensor(
+                        video_frame_indices,
+                        dtype=torch.int32,
+                    )
 
             # save_latent
             if to_disk:

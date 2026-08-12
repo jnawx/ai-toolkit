@@ -102,6 +102,11 @@ def prepare_temporal_character_mask(
             raise ValueError("temporal character masks must have one channel")
     if mask.ndim != 3:
         raise ValueError("temporal character masks must be HW, THW, 1THW, or T1HW")
+    if mask.shape[0] > 1 and frame_indices is None:
+        raise ValueError(
+            "Temporal character mask needs the video's sampled frame indices. "
+            "Delete and rebuild this item's latent cache."
+        )
     if frame_indices is not None and mask.shape[0] != len(frame_indices):
         if len(frame_indices) == 0 or max(frame_indices) >= mask.shape[0]:
             raise ValueError("temporal character mask has fewer frames than the source video")

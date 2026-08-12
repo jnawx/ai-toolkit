@@ -313,7 +313,8 @@ const docs: { [key: string]: ConfigDoc } = {
         counterfactual drifts as a heuristic. Character-speaking JSON sidecars provide the equivalent direct constraint
         for H3 audio. Without them, audio preservation keeps the LoRA close to the base model when the character trigger
         is absent but cannot identify individual speakers. Sparse DOP schedules are automatically multiplied by their
-        interval.
+        interval. Rebuild old latent caches when first adding temporal visual or audio annotations so their sampled-frame
+        and clip-timing metadata is stored.
       </>
     ),
   },

@@ -142,6 +142,44 @@ class CharacterDOPAudioLossTests(unittest.TestCase):
 
         self.assertEqual(intervals, [(1.0, 2.5)])
 
+    def test_audio_intervals_load_from_nested_dataset_editor_sidecar(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset = Path(temp_dir) / "dataset"
+            media = dataset / "scenes" / "scene.mp4"
+            sidecars = dataset / "_character_dop" / "audio"
+            media.parent.mkdir(parents=True)
+            media.touch()
+            nested_sidecar = sidecars / "scenes" / "scene.json"
+            nested_sidecar.parent.mkdir(parents=True)
+            nested_sidecar.write_text(
+                json.dumps({"character_intervals": [[1.0, 2.5]]}),
+                encoding="utf-8",
+            )
+
+            intervals = load_character_audio_intervals(
+                media_path=str(media),
+                intervals_path=str(sidecars),
+                dataset_root=str(dataset),
+            )
+
+        self.assertEqual(intervals, [(1.0, 2.5)])
+
+    def test_unannotated_items_fall_back_when_dataset_has_other_ui_sidecars(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset = Path(temp_dir) / "dataset"
+            media = dataset / "unannotated.mp4"
+            sidecars = dataset / "_character_dop" / "audio"
+            sidecars.mkdir(parents=True)
+            media.touch()
+
+            intervals = load_character_audio_intervals(
+                media_path=str(media),
+                intervals_path=str(sidecars),
+                dataset_root=str(dataset),
+            )
+
+        self.assertIsNone(intervals)
+
     def test_source_intervals_map_into_a_stretched_training_clip(self):
         intervals = map_audio_intervals_to_training_clip(
             [(11.0, 13.0), (18.0, 22.0)],
@@ -261,6 +299,26 @@ class CharacterDOPConfigTests(unittest.TestCase):
         )
 
         validate_configs(train, model, SaveConfig(), [dataset])
+
+    def test_character_mode_automatically_uses_annotations_created_by_the_dataset_ui(self):
+        with tempfile.TemporaryDirectory() as dataset_dir:
+            annotation_root = Path(dataset_dir) / "_character_dop"
+            visual_dir = annotation_root / "visual"
+            audio_dir = annotation_root / "audio"
+            visual_dir.mkdir(parents=True)
+            audio_dir.mkdir()
+            train = TrainConfig(diff_output_preservation_mode="character")
+            model = ModelConfig(name_or_path="unused", arch="minimax_h3")
+            dataset = DatasetConfig(
+                folder_path=dataset_dir,
+                resolution=[512],
+                do_audio=True,
+            )
+
+            validate_configs(train, model, SaveConfig(), [dataset])
+
+            self.assertEqual(dataset.mask_path, str(visual_dir))
+            self.assertEqual(dataset.character_dop_audio_mask_path, str(audio_dir))
 
 
 if __name__ == "__main__":

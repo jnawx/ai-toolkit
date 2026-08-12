@@ -8,6 +8,7 @@ import os
 import random
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import TYPE_CHECKING, List, Dict, Union
 import traceback
 
@@ -45,6 +46,7 @@ from toolkit.character_dop import (
     load_character_audio_intervals,
     prepare_temporal_character_mask,
 )
+from toolkit.character_dop_annotation import find_matching_character_visual_mask
 
 if TYPE_CHECKING:
     from toolkit.data_loader import AiToolkitDataset
@@ -1571,6 +1573,7 @@ class MaskFileItemDTOMixin:
             self.character_dop_audio_intervals = load_character_audio_intervals(
                 media_path=kwargs.get('path', None),
                 intervals_path=dataset_config.character_dop_audio_mask_path,
+                dataset_root=dataset_config.folder_path,
             )
         if dataset_config.alpha_mask:
             self.use_alpha_as_mask = True
@@ -1581,13 +1584,15 @@ class MaskFileItemDTOMixin:
             mask_path = dataset_config.mask_path if dataset_config.mask_path is not None else dataset_config.alpha_mask
             # we are using control images
             img_path = kwargs.get('path', None)
-            file_name_no_ext = os.path.splitext(os.path.basename(img_path))[0]
-            mask_extensions = img_ext_list + (['.npy'] if self.is_video else [])
-            for ext in mask_extensions:
-                if os.path.exists(os.path.join(mask_path, file_name_no_ext + ext)):
-                    self.mask_path = os.path.join(mask_path, file_name_no_ext + ext)
-                    self.has_mask_image = True
-                    break
+            matching_mask = find_matching_character_visual_mask(
+                media_path=Path(img_path),
+                mask_root=Path(mask_path),
+                dataset_dir=Path(dataset_config.folder_path or os.path.dirname(img_path)),
+                is_video=self.is_video,
+            )
+            if matching_mask is not None:
+                self.mask_path = str(matching_mask)
+                self.has_mask_image = True
 
     def load_mask_image(self: 'FileItemDTO'):
         if os.path.splitext(self.mask_path)[1].lower() == '.npy':

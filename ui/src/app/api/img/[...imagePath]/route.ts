@@ -16,6 +16,7 @@ const contentTypeMap: { [key: string]: string } = {
   '.bmp': 'image/bmp',
   // Videos
   '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
   '.avi': 'video/x-msvideo',
   '.mov': 'video/quicktime',
   '.mkv': 'video/x-matroska',
@@ -26,7 +27,9 @@ const contentTypeMap: { [key: string]: string } = {
   '.mp3': 'audio/mpeg',
   '.wav': 'audio/wav',
   '.flac': 'audio/flac',
+  '.aac': 'audio/aac',
   '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4',
 };
 
 export async function GET(request: NextRequest, { params }: { params: { imagePath: string } }) {

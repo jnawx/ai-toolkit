@@ -5,12 +5,17 @@ export const objectCopy = <T>(obj: T): T => {
 export const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export const imgExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp'];
-export const videoExtensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.m4v', '.flv'];
-export const audioExtensions = ['.mp3', '.wav', '.flac', '.ogg'];
+export const videoExtensions = ['.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.flv'];
+export const audioExtensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a'];
 
-export const isVideo = (filePath: string) => videoExtensions.includes(filePath.toLowerCase().slice(-4));
-export const isImage = (filePath: string) => imgExtensions.includes(filePath.toLowerCase().slice(-4));
-export const isAudio = (filePath: string) => audioExtensions.includes(filePath.toLowerCase().slice(-4));
+const hasExtension = (filePath: string, extensions: string[]) => {
+  const lowerPath = filePath.toLowerCase();
+  return extensions.some(extension => lowerPath.endsWith(extension));
+};
+
+export const isVideo = (filePath: string) => hasExtension(filePath, videoExtensions);
+export const isImage = (filePath: string) => hasExtension(filePath, imgExtensions);
+export const isAudio = (filePath: string) => hasExtension(filePath, audioExtensions);
 
 export const tagsToObj = (tagStr: string): Record<string, any> => {
   const result: Record<string, any> = {};

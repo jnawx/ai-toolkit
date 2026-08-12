@@ -295,6 +295,7 @@ if __name__ == "__main__":
     # find images
     img_list = []
     for root, dirs, files in os.walk(img_dir):
+        dirs[:] = [directory for directory in dirs if directory not in {"_controls", "_character_dop"}]
         for file in files:
             if "_controls" in root:
                 continue

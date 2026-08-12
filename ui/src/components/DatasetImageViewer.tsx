@@ -2,7 +2,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Dialog, DialogBackdrop, DialogPanel } from '@headlessui/react';
-import { Cog, SquareDashed } from 'lucide-react';
+import { Cog, ScanSearch, SquareDashed } from 'lucide-react';
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 import classNames from 'classnames';
 import { openConfirm } from './ConfirmModal';
@@ -13,6 +13,7 @@ import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
 import { BoundingBoxEditor, parseBoundingBoxes, extractBoxes } from './BoundingBoxOverlay';
 import IdeogramCaptionSidebar, { isIdeogramCaption } from './IdeogramCaptionSidebar';
 import datasetTemplates from '@/helpers/datasetTemplates';
+import CharacterDOPAnnotator from './CharacterDOPAnnotator';
 
 function safeParse(text: string): any {
   try {
@@ -23,6 +24,7 @@ function safeParse(text: string): any {
 }
 
 interface Props {
+  datasetName: string;
   imgPath: string | null; // current image path
   imageList: string[]; // all dataset image paths
   onChange: (nextPath: string | null) => void; // parent setter
@@ -32,6 +34,7 @@ interface Props {
 }
 
 export default function DatasetImageViewer({
+  datasetName,
   imgPath,
   imageList,
   onChange,
@@ -47,6 +50,7 @@ export default function DatasetImageViewer({
   const [showBoxes, setShowBoxes] = useState<boolean>(false);
   const [selectedBoxIndex, setSelectedBoxIndex] = useState<number | null>(null);
   const [isDrawing, setIsDrawing] = useState<boolean>(false);
+  const [showCharacterAnnotator, setShowCharacterAnnotator] = useState(false);
   const captionRef = useRef<string>('');
   const savedCaptionRef = useRef<string>('');
   const currentImgPathRef = useRef<string | null>(null);
@@ -60,6 +64,7 @@ export default function DatasetImageViewer({
   useEffect(() => {
     setSelectedBoxIndex(null);
     setIsDrawing(false);
+    setShowCharacterAnnotator(false);
   }, [imgPath]);
 
   // Default to showing the editable boxes when an Ideogram caption is present.
@@ -294,6 +299,7 @@ export default function DatasetImageViewer({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!isOpen) return;
+      if (showCharacterAnnotator) return;
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName;
       const isTyping = tag === 'TEXTAREA' || tag === 'INPUT' || (target?.isContentEditable ?? false);
@@ -328,7 +334,7 @@ export default function DatasetImageViewer({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onCancel, handlePrev, handleNext, handleDelete, showBoxes, selectedBoxIndex, handleDeleteBox]);
+  }, [isOpen, onCancel, handlePrev, handleNext, handleDelete, showBoxes, selectedBoxIndex, handleDeleteBox, showCharacterAnnotator]);
 
   // Touch swipe navigation
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -460,6 +466,16 @@ export default function DatasetImageViewer({
 
               {/* Controls over the image */}
               <div className="absolute top-2 right-2 flex items-center gap-2 z-20">
+                {imgPath && (
+                  <button
+                    type="button"
+                    onClick={() => setShowCharacterAnnotator(true)}
+                    title="Annotate Character DOP masks and speaking intervals"
+                    className="rounded-full bg-gray-900 p-1 leading-[0px] text-violet-400 opacity-70 hover:opacity-100"
+                  >
+                    <ScanSearch />
+                  </button>
+                )}
                 {canShowBoxes && (
                   <button
                     type="button"
@@ -522,6 +538,15 @@ export default function DatasetImageViewer({
                   {currentIndex >= 0 ? `${currentIndex + 1} / ${imageList.length}` : ''}
                 </div>
               </div>
+              {imgPath && (
+                <button
+                  type="button"
+                  className="flex items-center justify-center gap-2 rounded border border-violet-700 bg-violet-950/40 px-3 py-2 text-violet-200 hover:bg-violet-900/50"
+                  onClick={() => setShowCharacterAnnotator(true)}
+                >
+                  <ScanSearch size={16} /> Annotate Character DOP
+                </button>
+              )}
               {isCaptionLoaded && caption.trim() === '' && (
                 <select
                   className="w-full bg-gray-900 border border-gray-700 text-gray-100 text-sm rounded p-2 outline-none focus:ring-0 focus:outline-none"
@@ -575,6 +600,14 @@ export default function DatasetImageViewer({
           </DialogPanel>
         </div>
       </div>
+      {imgPath && (
+        <CharacterDOPAnnotator
+          open={showCharacterAnnotator}
+          datasetName={datasetName}
+          mediaPath={imgPath}
+          onClose={() => setShowCharacterAnnotator(false)}
+        />
+      )}
     </Dialog>,
     document.body,
   );

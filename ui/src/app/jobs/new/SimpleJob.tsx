@@ -1398,10 +1398,16 @@ export default function SimpleJob({
                           />
                         )}
                         {jobConfig.config.process[0].model.arch === 'minimax_h3' &&
+                          jobConfig.config.process[0].train.diff_output_preservation_mode === 'character' && (
+                            <div className="my-2 rounded border border-violet-800 bg-violet-950/30 p-2 text-xs leading-relaxed text-violet-200">
+                              Character masks and speaking intervals created from the dataset viewer are used automatically.
+                            </div>
+                          )}
+                        {jobConfig.config.process[0].model.arch === 'minimax_h3' &&
                           jobConfig.config.process[0].train.diff_output_preservation_mode === 'character' &&
                           (dataset.do_audio || isAudioOnlyDataset(dataset)) && (
                             <TextInput
-                              label="Character Speaking Masks"
+                              label="External Speaking Masks (optional)"
                               value={dataset.character_dop_audio_mask_path ?? ''}
                               onChange={value =>
                                 setJobConfig(

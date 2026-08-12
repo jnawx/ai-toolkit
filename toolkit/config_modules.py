@@ -1038,6 +1038,11 @@ class DatasetConfig:
         self.character_dop_audio_mask_path: str = kwargs.get(
             'character_dop_audio_mask_path', None
         )
+        # The dataset editor stores Character DOP annotations in a conventional
+        # hidden folder beside the media. Explicit mask paths still win.
+        self.character_dop_use_dataset_annotations: bool = kwargs.get(
+            'character_dop_use_dataset_annotations', True
+        )
         self.unconditional_path: str = kwargs.get('unconditional_path',
                                                   None)  # path where matching unconditional images are located
         self.invert_mask: bool = kwargs.get('invert_mask', False)  # invert mask
@@ -1542,6 +1547,27 @@ def validate_configs(
         )
 
     for dataset in dataset_configs:
+        if (
+            train_config.diff_output_preservation_mode == 'character'
+            and dataset.character_dop_use_dataset_annotations
+            and dataset.folder_path is not None
+        ):
+            annotation_root = os.path.join(dataset.folder_path, '_character_dop')
+            visual_path = os.path.join(annotation_root, 'visual')
+            audio_path = os.path.join(annotation_root, 'audio')
+            if (
+                not dataset.is_audio_only
+                and dataset.mask_path is None
+                and os.path.isdir(visual_path)
+            ):
+                dataset.mask_path = visual_path
+            if (
+                (dataset.do_audio or dataset.is_audio_only)
+                and dataset.character_dop_audio_mask_path is None
+                and os.path.isdir(audio_path)
+            ):
+                dataset.character_dop_audio_mask_path = audio_path
+
         if dataset.character_dop_audio_mask_path is not None:
             if train_config.diff_output_preservation_mode != 'character':
                 raise ValueError(

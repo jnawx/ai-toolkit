@@ -67,7 +67,7 @@ export async function POST(request: Request) {
  * @returns Array of absolute paths to image files
  */
 async function findImagesRecursively(dir: string): Promise<string[]> {
-  const imageExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.mp4', '.avi', '.mov', '.mkv', '.wmv', '.m4v', '.flv', '.mp3', '.wav', '.flac', '.ogg'];
+  const imageExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.flv', '.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a'];
   let results: string[] = [];
 
   // withFileTypes avoids a separate stat per entry — a big win on large datasets.
@@ -81,7 +81,7 @@ async function findImagesRecursively(dir: string): Promise<string[]> {
     const itemPath = path.join(dir, name);
 
     if (entry.isDirectory()) {
-      if (name === '_controls') continue;
+      if (name === '_controls' || name === '_character_dop') continue;
       subdirs.push(itemPath);
     } else if (entry.isFile()) {
       const ext = path.extname(name).toLowerCase();

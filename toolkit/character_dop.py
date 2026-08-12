@@ -7,37 +7,49 @@ from typing import List, Literal, Optional, Sequence, Tuple
 import torch
 import torch.nn.functional as F
 
+from toolkit.character_dop_schema import validate_character_audio_intervals
+
 
 CharacterDOPModality = Literal["visual", "audio"]
 AudioIntervals = Sequence[Sequence[Tuple[float, float]]]
 
 
 def _validated_audio_intervals(raw_intervals) -> List[Tuple[float, float]]:
-    intervals = []
-    if not isinstance(raw_intervals, list):
-        raise ValueError("character audio intervals must be a JSON list")
-    for interval in raw_intervals:
-        if not isinstance(interval, list) or len(interval) != 2:
-            raise ValueError("each character audio interval must be [start_seconds, end_seconds]")
-        start, end = float(interval[0]), float(interval[1])
-        if not math.isfinite(start) or not math.isfinite(end) or start < 0.0 or end <= start:
-            raise ValueError("character audio intervals must satisfy 0 <= start < end")
-        intervals.append((start, end))
-    return intervals
+    return validate_character_audio_intervals(raw_intervals)
 
 
 def load_character_audio_intervals(
     *,
     media_path: str,
     intervals_path: str,
-) -> List[Tuple[float, float]]:
+    dataset_root: Optional[str] = None,
+) -> Optional[List[Tuple[float, float]]]:
     """Load absolute source-time speaking intervals for one media item."""
     if os.path.isdir(intervals_path):
         stem = os.path.splitext(os.path.basename(media_path))[0]
-        sidecar_path = os.path.join(intervals_path, f"{stem}.json")
+        sidecar_path = None
+        if dataset_root is not None:
+            try:
+                relative_media = os.path.relpath(media_path, dataset_root)
+                if not relative_media.startswith('..' + os.sep) and relative_media != '..':
+                    relative_stem = os.path.splitext(relative_media)[0]
+                    nested_sidecar = os.path.join(intervals_path, f"{relative_stem}.json")
+                    if os.path.exists(nested_sidecar):
+                        sidecar_path = nested_sidecar
+            except ValueError:
+                pass
+        if sidecar_path is None:
+            sidecar_path = os.path.join(intervals_path, f"{stem}.json")
     else:
         sidecar_path = intervals_path
     if not os.path.exists(sidecar_path):
+        interval_dir = os.path.normpath(intervals_path)
+        is_dataset_editor_path = (
+            os.path.basename(interval_dir) == 'audio'
+            and os.path.basename(os.path.dirname(interval_dir)) == '_character_dop'
+        )
+        if is_dataset_editor_path:
+            return None
         raise FileNotFoundError(
             f"Character DOP audio interval sidecar not found: {sidecar_path}"
         )

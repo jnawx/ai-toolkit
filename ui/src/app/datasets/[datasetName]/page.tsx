@@ -198,6 +198,7 @@ export default function DatasetPage({ params }: { params: { datasetName: string 
         />
       )}
       <DatasetImageViewer
+        datasetName={datasetName}
         imgPath={selectedImgPath}
         imageList={imgPaths}
         onChange={setSelectedImgPath}

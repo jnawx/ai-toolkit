@@ -19,6 +19,7 @@ import albumentations as A
 from toolkit import image_utils
 from toolkit.audio.processing import plan_audio_segment
 from toolkit.buckets import get_bucket_for_image_size, BucketResolution
+from toolkit.character_dop_annotation import is_character_annotation_artifact
 from toolkit.config_modules import DatasetConfig, preprocess_dataset_raw_config
 from toolkit.dataloader_mixins import CaptionMixin, BucketsMixin, LatentCachingMixin, Augments, CLIPCachingMixin, ControlCachingMixin, TextEmbeddingCachingMixin
 from toolkit.data_transfer_object.data_loader import FileItemDTO, DataLoaderBatchDTO
@@ -453,6 +454,11 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                 
         # remove items in the _controls_ folder
         file_list = [x for x in file_list if not os.path.basename(os.path.dirname(x)) == "_controls"]
+        if os.path.isdir(self.dataset_path):
+            file_list = [
+                path for path in file_list
+                if not is_character_annotation_artifact(path, self.dataset_path)
+            ]
 
         if self.dataset_config.num_repeats > 1:
             # repeat the list

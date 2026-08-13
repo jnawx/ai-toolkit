@@ -769,8 +769,10 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
             encoded = preview["data_url"].split(",", 1)[1]
             image = Image.open(io.BytesIO(base64.b64decode(encoded)))
             pixels = np.asarray(image)
-            self.assertEqual(tuple(pixels.shape), (4, 5))
-            self.assertEqual(int((pixels > 0).sum()), 4)
+            self.assertEqual(image.mode, "RGBA")
+            self.assertEqual(tuple(pixels.shape), (4, 5, 4))
+            self.assertEqual(int((pixels[..., 3] > 0).sum()), 4)
+            self.assertTrue(np.all(pixels[pixels[..., 3] == 0, :3] == 255))
 
     def test_all_identity_overlays_use_a_shared_relative_video_time(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

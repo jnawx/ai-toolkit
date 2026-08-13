@@ -1,7 +1,7 @@
 'use client';
 
 import { Dialog, DialogBackdrop, DialogPanel } from '@headlessui/react';
-import { AudioLines, Check, Loader2, MousePointer2, Pause, Play, RotateCcw, Save, ScanSearch, Trash2, UserRoundSearch, Users, X } from 'lucide-react';
+import { AudioLines, Check, ChevronLeft, ChevronRight, FileText, Loader2, MousePointer2, Pause, Play, RotateCcw, Save, ScanSearch, Trash2, UserRoundSearch, Users, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { apiClient } from '@/utils/api';
@@ -74,6 +74,15 @@ type Props = {
   onClose: () => void;
   embedded?: boolean;
   captionText?: string;
+  onCaptionChange?: (caption: string) => void;
+  onCaptionSave?: () => void;
+  captionSaved?: boolean;
+  onShowStandardDetails?: () => void;
+  onPrevious?: () => void;
+  onNext?: () => void;
+  hasPrevious?: boolean;
+  hasNext?: boolean;
+  mediaPosition?: string;
 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -185,7 +194,23 @@ function SpeakingTimeline({
   );
 }
 
-export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, onClose, embedded = false, captionText = '' }: Props) {
+export default function CharacterDOPAnnotator({
+  open,
+  datasetName,
+  mediaPath,
+  onClose,
+  embedded = false,
+  captionText = '',
+  onCaptionChange,
+  onCaptionSave,
+  captionSaved = true,
+  onShowStandardDetails,
+  onPrevious,
+  onNext,
+  hasPrevious = false,
+  hasNext = false,
+  mediaPosition,
+}: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const identitySelectionInitializedRef = useRef(false);
@@ -748,6 +773,18 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
               <h2 className="font-semibold text-gray-100">Character DOP Annotator</h2>
               <p className="truncate text-xs text-gray-500">{mediaPath.split(/[\\/]/).pop()}</p>
             </div>
+            {mediaPosition && <span className="text-xs text-gray-500">{mediaPosition}</span>}
+            <button type="button" className="rounded p-1.5 text-gray-400 hover:bg-gray-800 hover:text-white disabled:opacity-30" onClick={onPrevious} disabled={!hasPrevious} title="Previous media">
+              <ChevronLeft size={18} />
+            </button>
+            <button type="button" className="rounded p-1.5 text-gray-400 hover:bg-gray-800 hover:text-white disabled:opacity-30" onClick={onNext} disabled={!hasNext} title="Next media">
+              <ChevronRight size={18} />
+            </button>
+            {onShowStandardDetails && (
+              <button type="button" className="flex items-center gap-1.5 rounded border border-gray-700 px-2.5 py-1.5 text-xs text-gray-300 hover:bg-gray-800" onClick={onShowStandardDetails}>
+                <FileText size={14} /> Caption &amp; boxes
+              </button>
+            )}
             <button className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white" onClick={onClose} disabled={Boolean(busy)}>
               <X />
             </button>
@@ -837,6 +874,27 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
             <aside className="space-y-5 overflow-y-auto border-l border-gray-800 p-4 text-sm">
               {error && <div className="rounded border border-red-700 bg-red-950/60 p-3 text-red-200">{error}</div>}
               {message && <div className="rounded border border-blue-800 bg-blue-950/40 p-3 text-blue-200">{message}</div>}
+
+              {onCaptionChange && (
+                <section className="space-y-2 rounded-lg border border-gray-800 bg-gray-900/50 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="font-medium text-gray-100">Caption for this media</h3>
+                    <span className={`text-[11px] ${captionSaved ? 'text-gray-500' : 'text-blue-300'}`}>
+                      {captionSaved ? 'Saved' : 'Unsaved changes'}
+                    </span>
+                  </div>
+                  <textarea
+                    value={captionText}
+                    onChange={event => onCaptionChange(event.target.value)}
+                    onBlur={onCaptionSave}
+                    className="min-h-28 w-full rounded border border-gray-700 bg-gray-950 px-2.5 py-2 text-gray-100 outline-none focus:border-violet-500"
+                    placeholder="Describe the scene and use each selected identity's trigger word."
+                  />
+                  <button type="button" onClick={onCaptionSave} disabled={captionSaved} className="flex w-full items-center justify-center gap-1.5 rounded border border-gray-700 px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-40">
+                    <Save size={14} /> Save caption
+                  </button>
+                </section>
+              )}
 
               <section className="space-y-3 rounded-lg border border-gray-800 bg-gray-900/50 p-3">
                 <div>

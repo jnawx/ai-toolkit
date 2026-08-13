@@ -90,7 +90,7 @@ export default function DatasetImageViewer({
   const [showBoxes, setShowBoxes] = useState<boolean>(false);
   const [selectedBoxIndex, setSelectedBoxIndex] = useState<number | null>(null);
   const [isDrawing, setIsDrawing] = useState<boolean>(false);
-  const [showCharacterAnnotator, setShowCharacterAnnotator] = useState(false);
+  const [showCharacterAnnotator, setShowCharacterAnnotator] = useState(true);
   const [showIdentityOverlays, setShowIdentityOverlays] = useState(true);
   const [identityOverlays, setIdentityOverlays] = useState<IdentityOverlay[]>([]);
   const [overlayTimeFraction, setOverlayTimeFraction] = useState(0);
@@ -119,7 +119,7 @@ export default function DatasetImageViewer({
   useEffect(() => {
     setSelectedBoxIndex(null);
     setIsDrawing(false);
-    setShowCharacterAnnotator(false);
+    setShowCharacterAnnotator(true);
     setOverlayTimeFraction(0);
   }, [imgPath]);
 
@@ -475,12 +475,7 @@ export default function DatasetImageViewer({
   return createPortal(
     <Dialog
       open={isOpen}
-      onClose={() => {
-        if (showCharacterAnnotator) {
-          setShowCharacterAnnotator(false);
-          setOverlayRevision(current => current + 1);
-        } else onCancel();
-      }}
+      onClose={onCancel}
       className="relative z-50"
     >
       <DialogBackdrop
@@ -573,16 +568,6 @@ export default function DatasetImageViewer({
                     <Layers3 />
                   </button>
                 )}
-                {imgPath && (
-                  <button
-                    type="button"
-                    onClick={() => setShowCharacterAnnotator(true)}
-                    title="Annotate Character DOP masks and speaking intervals"
-                    className="rounded-full bg-gray-900 p-1 leading-[0px] text-violet-400 opacity-70 hover:opacity-100"
-                  >
-                    <ScanSearch />
-                  </button>
-                )}
                 {canShowBoxes && (
                   <button
                     type="button"
@@ -646,12 +631,8 @@ export default function DatasetImageViewer({
                 </div>
               </div>
               {imgPath && (
-                <button
-                  type="button"
-                  className="flex items-center justify-center gap-2 rounded border border-violet-700 bg-violet-950/40 px-3 py-2 text-violet-200 hover:bg-violet-900/50"
-                  onClick={() => setShowCharacterAnnotator(true)}
-                >
-                  <ScanSearch size={16} /> Annotate Character DOP
+                <button type="button" className="flex items-center justify-center gap-2 rounded border border-gray-700 px-3 py-2 text-gray-300 hover:bg-gray-800" onClick={() => setShowCharacterAnnotator(true)}>
+                  <ScanSearch size={16} /> Character annotation
                 </button>
               )}
               {showIdentityOverlays && identityOverlays.length > 0 && (
@@ -721,10 +702,19 @@ export default function DatasetImageViewer({
                   datasetName={datasetName}
                   mediaPath={imgPath}
                   captionText={caption}
-                  onClose={() => {
+                  onCaptionChange={setCaption}
+                  onCaptionSave={saveCaption}
+                  captionSaved={isCaptionCurrent}
+                  onShowStandardDetails={() => {
                     setShowCharacterAnnotator(false);
                     setOverlayRevision(current => current + 1);
                   }}
+                  onPrevious={handlePrev}
+                  onNext={handleNext}
+                  hasPrevious={currentIndex > 0}
+                  hasNext={currentIndex >= 0 && currentIndex < imageList.length - 1}
+                  mediaPosition={currentIndex >= 0 ? `${currentIndex + 1} / ${imageList.length}` : undefined}
+                  onClose={onCancel}
                 />
               </div>
             )}

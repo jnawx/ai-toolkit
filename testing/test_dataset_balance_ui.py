@@ -482,6 +482,30 @@ console.log(JSON.stringify(calculateDatasetBalance([dataset(1), dataset(10)], {{
         self.assertAlmostEqual(rows[0]["samplingShare"], 1 / 11)
         self.assertAlmostEqual(rows[1]["samplingShare"], 10 / 11)
 
+    def test_auto_balance_repeats_equalizes_training_and_regularization_pools_separately(self):
+        module_path = (
+            Path(__file__).parents[1] / "ui" / "src" / "app" / "jobs" / "new" / "datasetBalance.ts"
+        ).resolve()
+        script = f"""
+import {{ pathToFileURL }} from 'node:url';
+const {{ autoBalanceDatasetRepeats }} = await import(pathToFileURL({json.dumps(str(module_path))}).href);
+const datasets = [
+  {{ folder_path: '/small', num_repeats: 1, is_reg: false }},
+  {{ folder_path: '/large', num_repeats: 1, is_reg: false }},
+  {{ folder_path: '/reg-small', num_repeats: 1, is_reg: true }},
+  {{ folder_path: '/reg-large', num_repeats: 1, is_reg: true }}
+];
+const row = (index, effectiveItems, isRegularization) => ({{ index, effectiveItems, repeatFactor: 1, isRegularization }});
+console.log(JSON.stringify(autoBalanceDatasetRepeats(datasets, [row(0, 10, false), row(1, 40, false), row(2, 2, true), row(3, 6, true)])));
+"""
+        completed = subprocess.run(
+            ["node", "--experimental-strip-types", "--input-type=module", "-e", script],
+            check=True, capture_output=True, text=True,
+        )
+        datasets = json.loads(completed.stdout)
+
+        self.assertEqual([item["num_repeats"] for item in datasets], [4, 1, 3, 1])
+
     def test_joint_view_projection_requires_two_selected_identities_on_the_source(self):
         module_path = (
             Path(__file__).parents[1] / "ui" / "src" / "app" / "jobs" / "new" / "datasetBalance.ts"

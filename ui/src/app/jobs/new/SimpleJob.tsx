@@ -33,7 +33,7 @@ import { FlipHorizontal2, FlipVertical2 } from 'lucide-react';
 import { handleModelArchChange } from './utils';
 import { IoFlaskSharp } from 'react-icons/io5';
 import { isMac } from '@/helpers/basic';
-import { calculateDatasetBalance, type DatasetInventory } from './datasetBalance';
+import { autoBalanceDatasetRepeats, calculateDatasetBalance, type DatasetInventory } from './datasetBalance';
 import CharacterTrainingPanel from './CharacterTrainingPanel';
 
 type Props = {
@@ -293,7 +293,7 @@ export default function SimpleJob({
             )}
             {disableSections.includes('trigger_word') ? null : (
               <TextInput
-                label="Trigger Word"
+                label="Legacy / single trigger word"
                 value={jobConfig.config.process[0].trigger_word || ''}
                 docKey="config.process[0].trigger_word"
                 onChange={(value: string | null) => {
@@ -303,8 +303,29 @@ export default function SimpleJob({
                   setJobConfig(value, 'config.process[0].trigger_word');
                 }}
                 placeholder=""
-                required
+                required={!characterDopEnabled}
               />
+            )}
+            {!disableSections.includes('trigger_word') && (
+              <div className="mt-2 space-y-2 rounded border border-gray-700 bg-gray-950/60 p-2.5 text-xs text-gray-400">
+                <p><span className="font-medium text-gray-200">Multiple trigger words</span> are selected as named identities in the Character curriculum below; do not combine them in the legacy field.</p>
+                {jobConfig.config.process[0].model.arch === 'minimax_h3' ? (
+                  !characterDopEnabled && (
+                    <button
+                      type="button"
+                      className="w-full rounded border border-violet-700 px-2 py-1.5 text-violet-200 hover:bg-violet-950/50"
+                      onClick={() => {
+                        setJobConfig(true, 'config.process[0].train.diff_output_preservation');
+                        setJobConfig('character', 'config.process[0].train.diff_output_preservation_mode');
+                      }}
+                    >
+                      Enable multi-character training
+                    </button>
+                  )
+                ) : (
+                  <p className="text-amber-300/80">Multi-character visual/audio identity training is currently available for MiniMax H3. Choose MiniMax H3 to enable identity selection.</p>
+                )}
+              </div>
             )}
           </Card>
 
@@ -1265,16 +1286,6 @@ export default function SimpleJob({
         <div>
           <Card title="Datasets">
             <>
-              {characterDopEnabled && (
-                <CharacterTrainingPanel
-                  value={jobConfig.config.process[0].train.character_training}
-                  onChange={value => setJobConfig(value, 'config.process[0].train.character_training')}
-                  datasets={jobConfig.config.process[0].datasets}
-                  inventories={datasetStats}
-                  inventoryStatus={datasetStatsStatus}
-                  refreshInventories={refreshDatasetStats}
-                />
-              )}
               <section className="mb-4 overflow-hidden rounded-lg border border-gray-700 bg-gray-900/60">
                 <div className="flex items-start justify-between gap-3 border-b border-gray-800 px-4 py-3">
                   <div>
@@ -1283,17 +1294,41 @@ export default function SimpleJob({
                       Estimated sampling after named Character DOP views, selected resolutions, repeats, and flips. Regularization and training use separate pools that alternate on eligible steps. LoRA weight does not change sampling share; it scales that dataset&apos;s network effect after selection.
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={refreshDatasetStats}
-                    disabled={datasetStatsStatus === 'loading'}
-                    className="flex shrink-0 items-center gap-1.5 rounded border border-gray-700 px-2.5 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
-                    title="Refresh dataset inventory"
-                  >
-                    <RefreshCw size={14} className={datasetStatsStatus === 'loading' ? 'animate-spin' : ''} />
-                    Refresh
-                  </button>
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setJobConfig(
+                        autoBalanceDatasetRepeats(jobConfig.config.process[0].datasets, datasetBalance),
+                        'config.process[0].datasets',
+                      )}
+                      disabled={datasetStatsStatus !== 'success' || datasetBalance.every(row => row.effectiveItems <= 0)}
+                      className="rounded border border-emerald-800 px-2.5 py-1.5 text-xs text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-40"
+                      title="Raise smaller datasets' repeat counts so each training pool contributes approximately equally"
+                    >
+                      Auto-balance repeats
+                    </button>
+                    <button
+                      type="button"
+                      onClick={refreshDatasetStats}
+                      disabled={datasetStatsStatus === 'loading'}
+                      className="flex items-center gap-1.5 rounded border border-gray-700 px-2.5 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                      title="Refresh dataset inventory"
+                    >
+                      <RefreshCw size={14} className={datasetStatsStatus === 'loading' ? 'animate-spin' : ''} />
+                      Refresh
+                    </button>
+                  </div>
                 </div>
+                {characterDopEnabled && (
+                  <CharacterTrainingPanel
+                    value={jobConfig.config.process[0].train.character_training}
+                    onChange={value => setJobConfig(value, 'config.process[0].train.character_training')}
+                    datasets={jobConfig.config.process[0].datasets}
+                    inventories={datasetStats}
+                    inventoryStatus={datasetStatsStatus}
+                    refreshInventories={refreshDatasetStats}
+                  />
+                )}
                 {datasetStatsStatus === 'error' ? (
                   <p className="px-4 py-3 text-xs text-red-300">Dataset inventory could not be loaded. Training settings are unaffected.</p>
                 ) : (
@@ -1334,7 +1369,24 @@ export default function SimpleJob({
                               )}
                             </td>
                             <td className="px-3 py-2.5">
-                              {row.resolutionFactor}× / {row.repeatFactor}× / {row.flipFactor}×
+                              <span>{row.resolutionFactor}× / </span>
+                              <input
+                                aria-label={`Dataset ${row.index + 1} repeats`}
+                                type="number"
+                                min={1}
+                                max={1000}
+                                value={row.repeatFactor}
+                                onChange={event => {
+                                  const datasets = [...jobConfig.config.process[0].datasets];
+                                  datasets[row.index] = {
+                                    ...datasets[row.index],
+                                    num_repeats: Math.max(1, Math.min(1000, Math.trunc(Number(event.target.value) || 1))),
+                                  };
+                                  setJobConfig(datasets, 'config.process[0].datasets');
+                                }}
+                                className="w-16 rounded border border-gray-700 bg-gray-950 px-1.5 py-1 text-gray-200"
+                              />
+                              <span>× / {row.flipFactor}×</span>
                             </td>
                             <td className="px-3 py-2.5 font-medium text-gray-100">{row.effectiveItems.toLocaleString()}</td>
                             <td className="px-3 py-2.5">{(row.samplingShare * 100).toFixed(1)}%</td>

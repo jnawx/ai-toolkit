@@ -182,6 +182,48 @@ class CharacterDOPUIContractTests(unittest.TestCase):
         self.assertIn("result.cleanup_pending", source)
         self.assertIn("result.cleanup_errors.join", source)
 
+    def test_media_details_open_with_character_annotation_and_caption_controls_inline(self):
+        viewer = (
+            Path(__file__).parents[1] / "ui" / "src" / "components" / "DatasetImageViewer.tsx"
+        ).read_text(encoding="utf-8")
+        annotator = (
+            Path(__file__).parents[1] / "ui" / "src" / "components" / "CharacterDOPAnnotator.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("useState(true)", viewer)
+        self.assertIn("setShowCharacterAnnotator(true)", viewer)
+        self.assertIn("onCaptionChange={setCaption}", viewer)
+        self.assertNotIn("> Annotate Character DOP", viewer)
+        self.assertIn("Caption for this media", annotator)
+        self.assertIn("onShowStandardDetails", annotator)
+
+    def test_job_screen_explains_single_and_multi_identity_trigger_paths(self):
+        simple_job = (
+            Path(__file__).parents[1] / "ui" / "src" / "app" / "jobs" / "new" / "SimpleJob.tsx"
+        ).read_text(encoding="utf-8")
+        curriculum = (
+            Path(__file__).parents[1] / "ui" / "src" / "app" / "jobs" / "new" / "CharacterTrainingPanel.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('label="Legacy / single trigger word"', simple_job)
+        self.assertIn("Enable multi-character training", simple_job)
+        self.assertIn("Multiple trigger words", simple_job)
+        self.assertIn("Character identities &amp; trigger words", curriculum)
+        self.assertIn("Selected trigger words", curriculum)
+
+    def test_dataset_overview_has_direct_and_automatic_balance_controls(self):
+        simple_job = (
+            Path(__file__).parents[1] / "ui" / "src" / "app" / "jobs" / "new" / "SimpleJob.tsx"
+        ).read_text(encoding="utf-8")
+        curriculum = (
+            Path(__file__).parents[1] / "ui" / "src" / "app" / "jobs" / "new" / "CharacterTrainingPanel.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Auto-balance repeats", simple_job)
+        self.assertIn('aria-label={`Dataset ${row.index + 1} repeats`}', simple_job)
+        self.assertIn("Equalize source mix", curriculum)
+        self.assertIn("setAdvanced(true)", curriculum)
+
 
 if __name__ == "__main__":
     unittest.main()

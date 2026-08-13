@@ -41,7 +41,7 @@ export default function CharacterTrainingPanel({
   const [identities, setIdentities] = useState<CharacterIdentity[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [advanced, setAdvanced] = useState(false);
+  const [advanced, setAdvanced] = useState(true);
   const [manageOpen, setManageOpen] = useState(false);
 
   const loadIdentities = useCallback(async () => {
@@ -147,11 +147,39 @@ export default function CharacterTrainingPanel({
     updateIdentity(identity.id, { source_weights });
   };
 
+  const equalizeSourceMix = () => {
+    onChange({
+      ...strategy,
+      identities: strategy.identities.map(identity => {
+        const automatic = calculateCharacterIdentitySourceShares(
+          { ...identity, source_weights: undefined },
+          selectedIds,
+          strategy.joint_training_fraction,
+          trainingDatasets,
+          inventories,
+        );
+        const eligiblePaths = [...automatic.entries()]
+          .filter(([, share]) => share > 0)
+          .map(([path]) => path);
+        if (!eligiblePaths.length) return identity;
+        const equalShare = 1 / eligiblePaths.length;
+        return {
+          ...identity,
+          source_weights: {
+            ...Object.fromEntries(eligiblePaths.map(path => [path, equalShare])),
+            '*': 0,
+          },
+        };
+      }),
+    });
+    setAdvanced(true);
+  };
+
   return (
     <section className="mb-4 overflow-hidden rounded-lg border border-violet-900/70 bg-violet-950/10">
       <div className="flex items-start justify-between gap-3 border-b border-gray-800 px-4 py-3">
         <div>
-          <h2 className="font-semibold text-gray-100">Character training curriculum</h2>
+          <h2 className="font-semibold text-gray-100">Character identities &amp; trigger words</h2>
           <p className="mt-1 max-w-3xl text-xs leading-relaxed text-gray-400">
             Select exactly who this job trains. Unselected media is ignored. Focus views isolate one identity; joint views retain every selected trigger in a shared scene. Regularization datasets stay in their separate preservation pool.
           </p>
@@ -167,6 +195,17 @@ export default function CharacterTrainingPanel({
       </div>
 
       <div className="space-y-3 p-4">
+        <div className="rounded border border-gray-800 bg-gray-950/60 p-2.5">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Selected trigger words</p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {strategy.identities.length === 0 ? (
+              <span className="text-xs text-amber-300">None selected—choose at least one identity below.</span>
+            ) : strategy.identities.map(selectedIdentity => {
+              const identity = identities.find(item => item.id === selectedIdentity.id);
+              return <span key={selectedIdentity.id} className="rounded bg-violet-950 px-2 py-1 text-xs text-violet-200">{identity?.trigger_word ?? selectedIdentity.id}</span>;
+            })}
+          </div>
+        </div>
         {error && <p className="rounded border border-red-800 bg-red-950/30 p-2 text-xs text-red-200">{error}</p>}
         {!loading && identities.length === 0 && !error && (
           <p className="rounded border border-dashed border-gray-700 p-3 text-sm text-gray-400">Create a shared identity, then annotate it in any dataset.</p>
@@ -222,9 +261,14 @@ export default function CharacterTrainingPanel({
           <label className="text-sm text-gray-300">Joint composition training
             <input className={`${inputClass} ml-2 w-20`} type="number" min="0" max="100" value={percent(strategy.joint_training_fraction, 0)} onChange={event => onChange({ ...strategy, joint_training_fraction: Math.max(0, Math.min(100, Number(event.target.value))) / 100 })} />%
           </label>
-          <button type="button" onClick={() => setAdvanced(value => !value)} className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white">
-            <Settings2 size={14} /> Per-modality and dataset controls {advanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          </button>
+          <div className="flex items-center gap-3">
+            <button type="button" disabled={strategy.identities.length === 0 || inventoryStatus !== 'success'} onClick={equalizeSourceMix} className="rounded border border-emerald-800 px-2.5 py-1.5 text-xs text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-40">
+              Equalize source mix
+            </button>
+            <button type="button" onClick={() => setAdvanced(value => !value)} className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white">
+              <Settings2 size={14} /> Per-modality and dataset controls {advanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            </button>
+          </div>
         </div>
 
         {strategy.identities.length > 0 && trainingDatasets.length > 0 && (

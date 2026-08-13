@@ -76,6 +76,23 @@ export type DatasetBalanceRow = {
   error?: string;
 };
 
+export function autoBalanceDatasetRepeats<T extends { num_repeats?: number }>(
+  datasets: T[],
+  rows: Array<Pick<DatasetBalanceRow, 'index' | 'effectiveItems' | 'repeatFactor' | 'isRegularization'>>,
+): T[] {
+  const next = datasets.map(dataset => ({ ...dataset }));
+  for (const regularization of [false, true]) {
+    const pool = rows
+      .filter(row => row.isRegularization === regularization && row.effectiveItems > 0 && row.repeatFactor > 0)
+      .map(row => ({ row, baseItems: row.effectiveItems / row.repeatFactor }));
+    const target = Math.max(0, ...pool.map(item => item.baseItems));
+    for (const { row, baseItems } of pool) {
+      next[row.index].num_repeats = Math.max(1, Math.min(1000, Math.ceil(target / baseItems)));
+    }
+  }
+  return next;
+}
+
 const emptyInventory = (): DatasetMediaInventory => ({
   sources: 0,
   assignedSources: 0,

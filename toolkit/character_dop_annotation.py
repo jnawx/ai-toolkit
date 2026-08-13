@@ -1263,9 +1263,10 @@ def _load_character_visual_mask(paths: CharacterAnnotationPaths) -> np.ndarray:
 
 def _mask_frame_data_url(frame: np.ndarray) -> str:
     buffer = io.BytesIO()
-    Image.fromarray((np.asarray(frame) > 0).astype(np.uint8) * 255, mode="L").save(
-        buffer, format="PNG", optimize=True
-    )
+    alpha = (np.asarray(frame) > 0).astype(np.uint8) * 255
+    rgba = np.full((*alpha.shape, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = alpha
+    Image.fromarray(rgba, mode="RGBA").save(buffer, format="PNG", optimize=True)
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
 

@@ -5,6 +5,7 @@ from unittest.mock import patch
 from toolkit.character_training_sampler import (
     CharacterTrainingCandidate,
     CoverageWeightedSampler,
+    MAX_CHARACTER_EPOCH_SIZE,
     build_character_sampling_plan,
     recommended_character_epoch_size,
 )
@@ -233,6 +234,57 @@ class CharacterTrainingSamplerTests(unittest.TestCase):
         self.assertEqual(len(indices), 50)
         self.assertAlmostEqual(source_a / len(indices), 0.8, delta=0.02)
         self.assertAlmostEqual(source_b / len(indices), 0.2, delta=0.02)
+
+    def test_pathological_weights_and_epoch_sizes_are_rejected(self):
+        candidates = [
+            CharacterTrainingCandidate(
+                key=identity,
+                source_id=identity,
+                identity_id=identity,
+                identity_ids=(identity,),
+                view_mode="focus",
+                media_type="image",
+                dataset_path="/datasets/people",
+            )
+            for identity in ("alice", "bob")
+        ]
+        plan = build_character_sampling_plan(
+            candidates,
+            {
+                "identities": [
+                    {"id": "alice", "weight": 1},
+                    {"id": "bob", "weight": 1e-300},
+                ],
+                "joint_training_fraction": 0,
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "too imbalanced"):
+            recommended_character_epoch_size(plan.probabilities)
+        with self.assertRaisesRegex(ValueError, "cannot exceed"):
+            CoverageWeightedSampler([0.5, 0.5], MAX_CHARACTER_EPOCH_SIZE + 1)
+        with self.assertRaisesRegex(ValueError, "epoch_size"):
+            build_character_sampling_plan(
+                candidates,
+                {
+                    "identities": [
+                        {"id": "alice", "weight": 1},
+                        {"id": "bob", "weight": 1},
+                    ],
+                    "joint_training_fraction": 0,
+                    "epoch_size": MAX_CHARACTER_EPOCH_SIZE + 1,
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            build_character_sampling_plan(
+                candidates,
+                {
+                    "identities": [
+                        {"id": "alice", "weight": float("inf")},
+                        {"id": "bob", "weight": 1},
+                    ],
+                    "joint_training_fraction": 0,
+                },
+            )
 
     def test_dataloader_builds_sampler_from_expanded_views_and_strictly_validates_each_identity(self):
         strategy = {

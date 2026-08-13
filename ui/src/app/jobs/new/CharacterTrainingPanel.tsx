@@ -58,7 +58,9 @@ export default function CharacterTrainingPanel({
 
   useEffect(() => { void loadIdentities(); }, [loadIdentities]);
 
-  const trainingDatasets = datasets.filter(dataset => !dataset.is_reg && dataset.folder_path.trim());
+  const trainingDatasets = datasets.filter(
+    dataset => !dataset.is_reg && dataset.folder_path.trim() && dataset.character_dop_use_dataset_annotations !== false,
+  );
   const selected = new Map(strategy.identities.map(identity => [identity.id, identity]));
   const recommendedSoloFraction = (identityId: string) => {
     let solo = 0;

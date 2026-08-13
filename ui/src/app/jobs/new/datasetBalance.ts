@@ -34,6 +34,10 @@ export type DatasetBalanceOptions = {
   modelGroup?: string;
   characterDop: boolean;
   globalTrigger: boolean;
+  characterTraining?: {
+    identities: Array<{ id: string; weight: number; source_weights?: Record<string, number> }>;
+    joint_training_fraction: number;
+  };
 };
 
 export type DatasetBalanceRow = {
@@ -95,6 +99,36 @@ const inventoryForConfig = (
     : inventory.images;
 };
 
+const identityCoverageForConfig = (
+  dataset: DatasetBalanceConfig,
+  identity: import('./characterTrainingBalance').CharacterIdentityCoverage,
+) => {
+  const isAudioOnly = Boolean(dataset.do_audio) && dataset.resolution.length === 0;
+  if (isAudioOnly) return [identity.audio, identity.videosAudio];
+  const isVideo = dataset.num_frames > 1 || Boolean(dataset.auto_frame_count);
+  if (isVideo) return [identity.images, dataset.do_audio ? identity.videos : identity.videosVisual];
+  return [identity.images];
+};
+
+const selectedIdentityViewCount = (
+  dataset: DatasetBalanceConfig,
+  inventory: DatasetInventory | undefined,
+  options: DatasetBalanceOptions,
+) => {
+  if (!options.characterTraining || dataset.is_reg) return null;
+  if (dataset.character_dop_use_dataset_annotations === false) return 0;
+  const selectedIds = new Set(options.characterTraining.identities.map(identity => identity.id));
+  return (inventory?.identities ?? []).reduce((total, identity) => {
+    if (!selectedIds.has(identity.id)) return total;
+    const coverage = identityCoverageForConfig(dataset, identity);
+    const focusViews = coverage.reduce((sum, media) => sum + media.sources, 0);
+    const jointViews = Number(options.characterTraining?.joint_training_fraction ?? 0) > 0
+      ? coverage.reduce((sum, media) => sum + media.group, 0)
+      : 0;
+    return total + focusViews + jointViews;
+  }, 0);
+};
+
 export function calculateDatasetBalance(
   datasets: DatasetBalanceConfig[],
   statsByPath: Record<string, DatasetInventory>,
@@ -107,9 +141,13 @@ export function calculateDatasetBalance(
       : emptyInventory();
     const useCharacterViews =
       options.characterDop &&
+      !dataset.is_reg &&
       dataset.character_dop_use_dataset_annotations !== false &&
       Boolean(inventory?.identityCount);
-    const trainingViews = useCharacterViews
+    const curriculumViews = selectedIdentityViewCount(dataset, inventory, options);
+    const trainingViews = curriculumViews != null
+      ? curriculumViews
+      : useCharacterViews
       ? selected.sources - selected.assignedSources + selected.characterViews
       : selected.sources;
     const isAudioOnly = Boolean(dataset.do_audio) && dataset.resolution.length === 0;
@@ -128,7 +166,7 @@ export function calculateDatasetBalance(
     const augmentationFactor = resolutionFactor * repeatFactor * flipFactor;
     const isRegularization = Boolean(dataset.is_reg);
     const hasFallbackTrigger = options.globalTrigger || Boolean(dataset.trigger_word?.trim());
-    const unassignedCharacterSources = useCharacterViews && !hasFallbackTrigger && !isRegularization
+    const unassignedCharacterSources = curriculumViews == null && useCharacterViews && !hasFallbackTrigger && !isRegularization
       ? selected.sources - selected.assignedSources
       : 0;
 
@@ -162,6 +200,45 @@ export function calculateDatasetBalance(
     0,
   );
   const hasBothPools = trainingItems > 0 && regularizationItems > 0;
+  const curriculumShares = new Map<number, number>();
+  if (options.characterTraining) {
+    const totalIdentityWeight = options.characterTraining.identities.reduce(
+      (sum, identity) => sum + Number(identity.weight), 0,
+    );
+    for (const identity of options.characterTraining.identities) {
+      const identityShare = totalIdentityWeight > 0 ? Number(identity.weight) / totalIdentityWeight : 0;
+      const eligible = rows.map((row, index) => {
+        const dataset = datasets[index];
+        const inventory = findInventory(dataset.folder_path, statsByPath);
+        const coverage = inventory?.identities?.find(item => item.id === identity.id);
+        const count = coverage && !dataset.is_reg && dataset.character_dop_use_dataset_annotations !== false
+          ? identityCoverageForConfig(dataset, coverage).reduce((sum, media) => sum + media.sources, 0)
+          : 0;
+        return { index, path: dataset.folder_path, count };
+      }).filter(source => source.count > 0);
+      const explicit = new Map(
+        Object.entries(identity.source_weights ?? {})
+          .filter(([sourcePath]) => sourcePath !== '*')
+          .map(([sourcePath, weight]) => [normalizedPath(sourcePath), Number(weight)]),
+      );
+      const explicitTotal = [...explicit.values()].reduce((sum, weight) => sum + weight, 0);
+      const remainder = identity.source_weights?.['*'] ?? Math.max(0, 1 - explicitTotal);
+      const automaticCount = eligible.reduce(
+        (sum, source) => sum + (explicit.has(normalizedPath(source.path)) ? 0 : source.count), 0,
+      );
+      const allCount = eligible.reduce((sum, source) => sum + source.count, 0);
+      for (const source of eligible) {
+        const sourceShare = identity.source_weights
+          ? explicit.get(normalizedPath(source.path))
+            ?? (automaticCount > 0 ? remainder * source.count / automaticCount : 0)
+          : allCount > 0 ? source.count / allCount : 0;
+        curriculumShares.set(
+          source.index,
+          (curriculumShares.get(source.index) ?? 0) + identityShare * sourceShare,
+        );
+      }
+    }
+  }
   return rows.map(row => ({
     ...row,
     samplingShare: row.isRegularization
@@ -169,7 +246,7 @@ export function calculateDatasetBalance(
         ? (row.effectiveItems / regularizationItems) * (hasBothPools ? 0.5 : 1)
         : 0
       : trainingItems > 0
-        ? (row.effectiveItems / trainingItems) * (hasBothPools ? 0.5 : 1)
+        ? ((options.characterTraining ? curriculumShares.get(row.index) ?? 0 : row.effectiveItems / trainingItems)) * (hasBothPools ? 0.5 : 1)
         : 0,
   }));
 }

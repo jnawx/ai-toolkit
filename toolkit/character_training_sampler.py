@@ -14,6 +14,8 @@ from typing import Any, Sequence
 
 from torch.utils.data import Sampler
 
+MAX_CHARACTER_EPOCH_SIZE = 250_000
+
 
 @dataclass(frozen=True)
 class CharacterTrainingCandidate:
@@ -40,12 +42,18 @@ class CoverageWeightedSampler(Sampler[int]):
 
     def __init__(self, probabilities: Sequence[float], epoch_size: int, seed: int = 0):
         self.probabilities = tuple(float(value) for value in probabilities)
+        if any(not math.isfinite(value) or value < 0.0 for value in self.probabilities):
+            raise ValueError("character sampling probabilities must be finite and non-negative")
         self.eligible_indices = [
             index for index, probability in enumerate(self.probabilities) if probability > 0.0
         ]
         if not self.eligible_indices:
             raise ValueError("character sampling plan has no eligible views")
         self.epoch_size = int(epoch_size)
+        if self.epoch_size > MAX_CHARACTER_EPOCH_SIZE:
+            raise ValueError(
+                f"character sampling epoch cannot exceed {MAX_CHARACTER_EPOCH_SIZE:,} items"
+            )
         if self.epoch_size < len(self.eligible_indices):
             raise ValueError(
                 "character sampling epoch must be large enough to cover every eligible view"
@@ -99,13 +107,22 @@ def recommended_character_epoch_size(
     minimum_expected_count: int = 8,
 ) -> int:
     """Size a cycle so mandatory coverage does not erase target weights."""
-    positive = [float(value) for value in probabilities if float(value) > 0.0]
+    values = [float(value) for value in probabilities]
+    if any(not math.isfinite(value) or value < 0.0 for value in values):
+        raise ValueError("character sampling probabilities must be finite and non-negative")
+    positive = [value for value in values if value > 0.0]
     if not positive:
         raise ValueError("character sampling plan has no eligible views")
-    return max(
+    epoch_size = max(
         len(positive),
         math.ceil(max(1, int(minimum_expected_count)) / min(positive)),
     )
+    if epoch_size > MAX_CHARACTER_EPOCH_SIZE:
+        raise ValueError(
+            "character sampling weights are too imbalanced to realize safely; "
+            f"the automatic cycle would exceed {MAX_CHARACTER_EPOCH_SIZE:,} items"
+        )
+    return epoch_size
 
 
 def _identity_weights(raw_strategy: dict[str, Any]) -> dict[str, float]:
@@ -123,10 +140,12 @@ def _identity_weights(raw_strategy: dict[str, Any]) -> dict[str, float]:
             weight = float(raw_identity.get("weight", 1.0))
         except (TypeError, ValueError) as exc:
             raise ValueError(f"character training weight is invalid for {identity_id}") from exc
-        if not weight > 0.0:
+        if not math.isfinite(weight) or not weight > 0.0:
             raise ValueError(f"character training weight must be positive for {identity_id}")
         weights[identity_id] = weight
     total = sum(weights.values())
+    if not math.isfinite(total) or total <= 0.0:
+        raise ValueError("character training identity weights must have a finite positive total")
     return {identity_id: weight / total for identity_id, weight in weights.items()}
 
 
@@ -134,6 +153,15 @@ def validate_character_training_strategy(raw_strategy: dict[str, Any]) -> None:
     """Validate the public selected-identity curriculum interface."""
     _identity_weights(raw_strategy)
     _fraction(raw_strategy.get("joint_training_fraction", 0.0), "joint training fraction")
+    raw_epoch_size = raw_strategy.get("epoch_size", 0) or 0
+    try:
+        epoch_size = int(raw_epoch_size)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("character training epoch_size must be a whole number") from exc
+    if epoch_size != raw_epoch_size or not 0 <= epoch_size <= MAX_CHARACTER_EPOCH_SIZE:
+        raise ValueError(
+            f"character training epoch_size must be between 0 and {MAX_CHARACTER_EPOCH_SIZE:,}"
+        )
     for identity_id, identity_config in _identity_configs(raw_strategy).items():
         if "solo_fraction" in identity_config:
             _fraction(identity_config["solo_fraction"], f"solo fraction for {identity_id}")

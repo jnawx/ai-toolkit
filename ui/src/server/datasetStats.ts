@@ -30,6 +30,13 @@ export type DatasetInventory = {
   identityCount: number;
   identities: IdentityCoverage[];
   jointIdentityPairs: [string, string][];
+  jointIdentityPairsByMedia: {
+    images: [string, string][];
+    videos: [string, string][];
+    videosVisual: [string, string][];
+    videosAudio: [string, string][];
+    audio: [string, string][];
+  };
   images: MediaInventory;
   videos: MediaInventory;
   audio: MediaInventory;
@@ -281,12 +288,16 @@ export async function collectDatasetInventory(
       audio: { sources: 0, solo: 0, group: 0 },
     })),
     jointIdentityPairs: [],
+    jointIdentityPairsByMedia: {
+      images: [], videos: [], videosVisual: [], videosAudio: [], audio: [],
+    },
     images: emptyMediaInventory(),
     videos: emptyMediaInventory(),
     audio: emptyMediaInventory(),
     error: sharedCatalogError ?? catalog.error ?? identityAssignments.find(assignment => assignment.error)?.error,
   };
   const jointPairKeys = new Set<string>();
+  const jointPairKeysByMedia = new Map<keyof DatasetInventory['jointIdentityPairsByMedia'], Set<string>>();
 
   for (const sourcePath of sourceFiles) {
     const extension = path.extname(sourcePath).toLowerCase();
@@ -309,40 +320,55 @@ export async function collectDatasetInventory(
     if (viewCount > 0) category.assignedSources += 1;
     category.characterViews += viewCount;
 
-    const sourceIdentities = identityAssignments.filter(assignment => {
-      const hasVisual = IMAGE_EXTENSIONS.has(extension)
-        ? assignment.visualImages.has(sourceStem)
-        : assignment.visualTemporal.has(sourceStem);
-      return hasVisual || assignment.audio.has(sourceStem);
-    });
-    const sourceIdentityCount = sourceIdentities.length;
-    for (let left = 0; left < sourceIdentities.length; left++) {
-      for (let right = left + 1; right < sourceIdentities.length; right++) {
-        const pair = [sourceIdentities[left].id, sourceIdentities[right].id].sort() as [string, string];
-        const pairKey = `${pair[0]}\0${pair[1]}`;
-        if (!jointPairKeys.has(pairKey)) {
-          jointPairKeys.add(pairKey);
-          inventory.jointIdentityPairs.push(pair);
+    const imageIdentities = identityAssignments.filter(assignment => assignment.visualImages.has(sourceStem));
+    const videoVisualIdentities = identityAssignments.filter(assignment => assignment.visualTemporal.has(sourceStem));
+    const audioIdentities = identityAssignments.filter(assignment => assignment.audio.has(sourceStem));
+    const videoIdentities = identityAssignments.filter(
+      assignment => assignment.visualTemporal.has(sourceStem) || assignment.audio.has(sourceStem),
+    );
+    const addJointPairs = (
+      matching: IdentityAssignments[],
+      media: keyof DatasetInventory['jointIdentityPairsByMedia'],
+    ) => {
+      const mediaKeys = jointPairKeysByMedia.get(media) ?? new Set<string>();
+      jointPairKeysByMedia.set(media, mediaKeys);
+      for (let left = 0; left < matching.length; left++) {
+        for (let right = left + 1; right < matching.length; right++) {
+          const pair = [matching[left].id, matching[right].id].sort() as [string, string];
+          const pairKey = `${pair[0]}\0${pair[1]}`;
+          if (!mediaKeys.has(pairKey)) {
+            mediaKeys.add(pairKey);
+            inventory.jointIdentityPairsByMedia[media].push(pair);
+          }
+          if (!jointPairKeys.has(pairKey)) {
+            jointPairKeys.add(pairKey);
+            inventory.jointIdentityPairs.push(pair);
+          }
         }
       }
-    }
+    };
     const updateCoverage = (matching: IdentityAssignments[], field: keyof Omit<IdentityCoverage, 'id'>) => {
       for (const assignment of matching) {
         const coverage = inventory.identities.find(identity => identity.id === assignment.id)?.[field];
         if (!coverage) continue;
         coverage.sources += 1;
-        if (sourceIdentityCount > 1) coverage.group += 1;
+        if (matching.length > 1) coverage.group += 1;
         else coverage.solo += 1;
       }
     };
     if (IMAGE_EXTENSIONS.has(extension)) {
-      updateCoverage(identityAssignments.filter(assignment => assignment.visualImages.has(sourceStem)), 'images');
+      addJointPairs(imageIdentities, 'images');
+      updateCoverage(imageIdentities, 'images');
     } else if (VIDEO_EXTENSIONS.has(extension)) {
-      updateCoverage(sourceIdentities, 'videos');
-      updateCoverage(identityAssignments.filter(assignment => assignment.visualTemporal.has(sourceStem)), 'videosVisual');
-      updateCoverage(identityAssignments.filter(assignment => assignment.audio.has(sourceStem)), 'videosAudio');
+      addJointPairs(videoIdentities, 'videos');
+      addJointPairs(videoVisualIdentities, 'videosVisual');
+      addJointPairs(audioIdentities, 'videosAudio');
+      updateCoverage(videoIdentities, 'videos');
+      updateCoverage(videoVisualIdentities, 'videosVisual');
+      updateCoverage(audioIdentities, 'videosAudio');
     } else if (AUDIO_EXTENSIONS.has(extension)) {
-      updateCoverage(identityAssignments.filter(assignment => assignment.audio.has(sourceStem)), 'audio');
+      addJointPairs(audioIdentities, 'audio');
+      updateCoverage(audioIdentities, 'audio');
     }
   }
   return inventory;

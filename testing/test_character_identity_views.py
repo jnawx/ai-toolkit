@@ -48,6 +48,39 @@ class CharacterIdentityTrainingViewTests(unittest.TestCase):
         self.assertEqual(len(views), 1)
         self.assertEqual(views[0].character_dop_identity_id, "alice")
 
+    def test_focus_caption_replaces_annotated_identities_outside_enabled_modalities(self):
+        class Source:
+            is_audio_only = False
+            is_video = True
+            is_reg = False
+            dataset_config = SimpleNamespace(
+                do_audio=False,
+                character_training={
+                    "identities": [{"id": "alice", "weight": 1}],
+                    "joint_training_fraction": 0,
+                },
+            )
+            character_dop_identity_views = [
+                SimpleNamespace(
+                    identity_id="alice", trigger_word="AliceToken",
+                    caption_description="Alice description", visual_path=Path("alice.npy"),
+                    audio_intervals=None,
+                ),
+                SimpleNamespace(
+                    identity_id="bob", trigger_word="BobToken",
+                    caption_description="Bob description", visual_path=None,
+                    audio_intervals=[(0.0, 1.0)],
+                ),
+            ]
+
+            def bind_character_dop_identity(self, identity_view, **kwargs):
+                self.character_dop_identity_id = identity_view.identity_id
+                self.character_caption_replacements = kwargs["caption_replacements"]
+
+        views = expand_character_identity_file_items([Source()])
+
+        self.assertEqual(views[0].character_caption_replacements, {"BobToken": "Bob description"})
+
     def test_selected_identities_create_isolated_focus_and_joint_caption_views(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_dir = Path(tmp_dir)

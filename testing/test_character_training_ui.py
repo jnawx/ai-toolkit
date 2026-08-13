@@ -163,6 +163,89 @@ console.log(JSON.stringify(validateCharacterTrainingCoverage(
 
         self.assertEqual(errors, [])
 
+    def test_visual_only_video_ignores_audio_only_identities_for_joint_coverage(self):
+        strategy = {
+            "identities": [
+                {"id": "alice", "weight": 1, "solo_fraction": 1},
+                {"id": "bob", "weight": 1, "solo_fraction": 1},
+            ],
+            "joint_training_fraction": 0.25,
+        }
+        datasets = [{
+            "folder_path": "/train",
+            "is_reg": False,
+            "do_audio": False,
+            "num_frames": 39,
+        }]
+        empty = {"sources": 0, "solo": 0, "group": 0}
+        stats = {
+            "/train": {
+                "path": "/train",
+                "identities": [
+                    {
+                        "id": "alice",
+                        "images": empty,
+                        "videos": {"sources": 1, "solo": 0, "group": 1},
+                        "videosVisual": {"sources": 1, "solo": 1, "group": 0},
+                        "videosAudio": empty,
+                        "audio": empty,
+                    },
+                    {
+                        "id": "bob",
+                        "images": empty,
+                        "videos": {"sources": 1, "solo": 0, "group": 1},
+                        "videosVisual": empty,
+                        "videosAudio": {"sources": 1, "solo": 1, "group": 0},
+                        "audio": empty,
+                    },
+                ],
+                "jointIdentityPairs": [["alice", "bob"]],
+                "jointIdentityPairsByMedia": {
+                    "images": [],
+                    "videos": [["alice", "bob"]],
+                    "videosVisual": [],
+                    "videosAudio": [],
+                    "audio": [],
+                },
+            }
+        }
+
+        errors = self.run_validation(strategy, datasets, stats)
+
+        self.assertTrue(any("bob" in error.lower() and "no annotated" in error.lower() for error in errors))
+        self.assertTrue(any("joint" in error.lower() for error in errors))
+
+    def test_every_selected_identity_needs_joint_representation(self):
+        strategy = {
+            "identities": [
+                {"id": "alice", "weight": 1},
+                {"id": "bob", "weight": 1},
+                {"id": "carl", "weight": 1},
+            ],
+            "joint_training_fraction": 0.25,
+        }
+        datasets = [{"folder_path": "/train", "is_reg": False}]
+        empty = {"sources": 0, "solo": 0, "group": 0}
+        solo = {"sources": 1, "solo": 1, "group": 0}
+        group = {"sources": 1, "solo": 0, "group": 1}
+        stats = {
+            "/train": {
+                "path": "/train",
+                "identities": [
+                    {"id": "alice", "images": group, "videos": empty, "videosVisual": empty, "videosAudio": empty, "audio": empty},
+                    {"id": "bob", "images": group, "videos": empty, "videosVisual": empty, "videosAudio": empty, "audio": empty},
+                    {"id": "carl", "images": solo, "videos": empty, "videosVisual": empty, "videosAudio": empty, "audio": empty},
+                ],
+                "jointIdentityPairsByMedia": {
+                    "images": [["alice", "bob"]], "videos": [], "videosVisual": [], "videosAudio": [], "audio": [],
+                },
+            }
+        }
+
+        errors = self.run_validation(strategy, datasets, stats)
+
+        self.assertTrue(any("carl" in error.lower() and "shared" in error.lower() for error in errors))
+
 
 if __name__ == "__main__":
     unittest.main()

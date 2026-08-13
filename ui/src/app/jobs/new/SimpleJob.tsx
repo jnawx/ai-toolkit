@@ -104,6 +104,7 @@ export default function SimpleJob({
         modelGroup: modelArch?.group,
         characterDop: characterDopEnabled,
         globalTrigger: Boolean(jobConfig.config.process[0].trigger_word?.trim()),
+        characterTraining: jobConfig.config.process[0].train.character_training,
       },
     ),
     [
@@ -111,6 +112,7 @@ export default function SimpleJob({
       jobConfig.config.process[0].datasets,
       characterDopEnabled,
       jobConfig.config.process[0].trigger_word,
+      jobConfig.config.process[0].train.character_training,
       modelArch?.group,
     ],
   );

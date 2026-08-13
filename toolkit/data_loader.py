@@ -93,7 +93,7 @@ def expand_character_identity_file_items(file_items):
                 )
                 replacements = {
                     view.trigger_word: view.caption_description
-                    for view in usable_views
+                    for view in identity_views
                     if view.identity_id not in retained_ids
                 }
                 additional_triggers = [

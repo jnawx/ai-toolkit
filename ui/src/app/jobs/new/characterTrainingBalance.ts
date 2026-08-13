@@ -37,6 +37,13 @@ type Inventory = {
   path: string;
   identities?: CharacterIdentityCoverage[];
   jointIdentityPairs?: [string, string][];
+  jointIdentityPairsByMedia?: {
+    images: [string, string][];
+    videos: [string, string][];
+    videosVisual: [string, string][];
+    videosAudio: [string, string][];
+    audio: [string, string][];
+  };
   error?: string;
 };
 
@@ -60,6 +67,16 @@ const relevantCoverage = (dataset: DatasetSelection, identity: CharacterIdentity
 
 const total = (items: CharacterMediaCoverage[], key: keyof CharacterMediaCoverage) =>
   items.reduce((sum, item) => sum + Number(item[key] ?? 0), 0);
+
+const relevantJointPairs = (dataset: DatasetSelection, inventory: Inventory) => {
+  const scoped = inventory.jointIdentityPairsByMedia;
+  if (!scoped) return inventory.jointIdentityPairs ?? [];
+  const audioOnly = Boolean(dataset.do_audio) && (dataset.resolution?.length ?? 1) === 0;
+  const video = Boolean(dataset.auto_frame_count) || Number(dataset.num_frames ?? 1) > 1;
+  if (audioOnly) return [...scoped.audio, ...scoped.videosAudio];
+  if (video) return [...scoped.images, ...(dataset.do_audio ? scoped.videos : scoped.videosVisual)];
+  return scoped.images;
+};
 
 /** Strict UI mirror of runtime checks. Regularization never satisfies identity coverage. */
 export function validateCharacterTrainingCoverage(
@@ -126,13 +143,17 @@ export function validateCharacterTrainingCoverage(
     if (selectedIds.size < 2) {
       errors.push('Joint training requires at least two selected identities.');
     } else {
-      const hasJointCoverage = trainingDatasets.some(dataset => {
-        const inventory = findInventory(dataset.folder_path, inventories);
-        return (inventory?.jointIdentityPairs ?? []).some(
-          pair => selectedIds.has(pair[0]) && selectedIds.has(pair[1]),
-        );
-      });
-      if (!hasJointCoverage) errors.push('Joint training is requested, but no selected identities share an eligible group source.');
+      for (const selectedId of selectedIds) {
+        const hasJointCoverage = trainingDatasets.some(dataset => {
+          const inventory = findInventory(dataset.folder_path, inventories);
+          return inventory != null && relevantJointPairs(dataset, inventory).some(
+            pair => pair.includes(selectedId) && pair.every(identityId => selectedIds.has(identityId)),
+          );
+        });
+        if (!hasJointCoverage) {
+          errors.push(`Joint training is requested, but ${selectedId} has no eligible shared source with another selected identity.`);
+        }
+      }
     }
   }
   return [...new Set(errors)];

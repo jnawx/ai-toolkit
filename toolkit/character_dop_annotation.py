@@ -3,7 +3,10 @@ import base64
 import io
 import os
 import re
+import shutil
 import tempfile
+import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -172,15 +175,28 @@ def list_character_identities(dataset_dir: Path) -> list[dict]:
     return [dict(identity) for identity in identities]
 
 
-def save_character_identity(
+def _write_character_identity_catalog(catalog_path: Path, identities: list[dict]) -> None:
+    payload = {
+        "version": CHARACTER_IDENTITY_CATALOG_VERSION,
+        "identities": identities,
+    }
+    if len(_json_text(payload).encode("utf-8")) > MAX_CHARACTER_IDENTITY_CATALOG_BYTES:
+        raise ValueError(
+            f"character identity catalog exceeds {MAX_CHARACTER_IDENTITY_CATALOG_BYTES} bytes"
+        )
+    _write_json(catalog_path, payload)
+    _read_character_identity_catalog.cache_clear()
+
+
+def _save_character_identity(
     *,
     dataset_dir: Path,
     identity_id: str,
     display_name: str,
     trigger_word: str,
     class_prompt: str,
+    require_existing: Optional[bool],
 ) -> dict:
-    """Create or update one named identity in a dataset-level catalog."""
     identity = {
         "id": _validate_identity_id(identity_id),
         "display_name": _required_identity_text(display_name, "display name"),
@@ -212,6 +228,10 @@ def save_character_identity(
             (index for index, existing in enumerate(identities) if existing["id"] == identity["id"]),
             None,
         )
+        if require_existing is True and matching_index is None:
+            raise ValueError(f"unknown character identity: {identity['id']}")
+        if require_existing is False and matching_index is not None:
+            raise ValueError(f"character identity already exists: {identity['id']}")
         if matching_index is None:
             if len(identities) >= MAX_CHARACTER_IDENTITIES:
                 raise ValueError(
@@ -220,17 +240,129 @@ def save_character_identity(
             identities.append(identity)
         else:
             identities[matching_index] = identity
-        payload = {
-            "version": CHARACTER_IDENTITY_CATALOG_VERSION,
-            "identities": identities,
-        }
-        if len(_json_text(payload).encode("utf-8")) > MAX_CHARACTER_IDENTITY_CATALOG_BYTES:
-            raise ValueError(
-                f"character identity catalog exceeds {MAX_CHARACTER_IDENTITY_CATALOG_BYTES} bytes"
-            )
-        _write_json(catalog_path, payload)
-        _read_character_identity_catalog.cache_clear()
+        _write_character_identity_catalog(catalog_path, identities)
     return identity
+
+
+def save_character_identity(
+    *,
+    dataset_dir: Path,
+    identity_id: str,
+    display_name: str,
+    trigger_word: str,
+    class_prompt: str,
+) -> dict:
+    """Create a new named identity and reject an existing immutable id."""
+    return _save_character_identity(
+        dataset_dir=dataset_dir,
+        identity_id=identity_id,
+        display_name=display_name,
+        trigger_word=trigger_word,
+        class_prompt=class_prompt,
+        require_existing=False,
+    )
+
+
+def create_character_identity(
+    *,
+    dataset_dir: Path,
+    identity_id: str,
+    display_name: str,
+    trigger_word: str,
+    class_prompt: str,
+) -> dict:
+    """Create a new named identity and reject an existing immutable id."""
+    return _save_character_identity(
+        dataset_dir=dataset_dir,
+        identity_id=identity_id,
+        display_name=display_name,
+        trigger_word=trigger_word,
+        class_prompt=class_prompt,
+        require_existing=False,
+    )
+
+
+def update_character_identity(
+    *,
+    dataset_dir: Path,
+    identity_id: str,
+    display_name: str,
+    trigger_word: str,
+    class_prompt: str,
+) -> dict:
+    """Update metadata for an existing identity without recreating stale ids."""
+    return _save_character_identity(
+        dataset_dir=dataset_dir,
+        identity_id=identity_id,
+        display_name=display_name,
+        trigger_word=trigger_word,
+        class_prompt=class_prompt,
+        require_existing=True,
+    )
+
+
+def delete_character_identity(*, dataset_dir: Path, identity_id: str) -> dict:
+    """Delete one named identity and its owned annotations from a dataset."""
+    identity_id = _validate_identity_id(identity_id)
+    catalog_path = _identity_catalog_path(dataset_dir)
+    lock_path = _identity_catalog_lock_path(dataset_dir)
+    identity_root = _annotation_storage_path(
+        dataset_dir,
+        ANNOTATION_DIRECTORY,
+        "identities",
+        identity_id,
+    )
+    trash_root = _annotation_storage_path(
+        dataset_dir,
+        ANNOTATION_DIRECTORY,
+        ".deleted-identities",
+    )
+    staged_identity_root = None
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(lock_path), timeout=30):
+        identities = list_character_identities(dataset_dir)
+        deleted_identity = next(
+            (identity for identity in identities if identity["id"] == identity_id),
+            None,
+        )
+        if deleted_identity is None:
+            raise ValueError(f"unknown character identity: {identity_id}")
+        remaining_identities = [
+            identity for identity in identities if identity["id"] != identity_id
+        ]
+        if identity_root.exists():
+            trash_root.mkdir(parents=True, exist_ok=True)
+            staged_identity_root = _annotation_storage_path(
+                dataset_dir,
+                ANNOTATION_DIRECTORY,
+                ".deleted-identities",
+                f"{identity_id}-{uuid.uuid4().hex}",
+            )
+            identity_root.replace(staged_identity_root)
+        try:
+            _write_character_identity_catalog(catalog_path, remaining_identities)
+        except Exception:
+            if staged_identity_root is not None and staged_identity_root.exists():
+                staged_identity_root.replace(identity_root)
+            raise
+    cleanup_pending = False
+    if staged_identity_root is not None:
+        try:
+            if staged_identity_root.is_dir():
+                shutil.rmtree(staged_identity_root)
+            else:
+                staged_identity_root.unlink()
+        except OSError:
+            cleanup_pending = True
+        try:
+            trash_root.rmdir()
+        except OSError:
+            pass
+    return {
+        "deleted_identity": dict(deleted_identity),
+        "identities": [dict(identity) for identity in remaining_identities],
+        "cleanup_pending": cleanup_pending,
+    }
 
 
 def _require_character_identity(dataset_dir: Path, identity_id: Optional[str]) -> Optional[dict]:
@@ -248,6 +380,15 @@ def _require_character_identity(dataset_dir: Path, identity_id: Optional[str]) -
     if identity is None:
         raise ValueError(f"unknown character identity: {identity_id}")
     return identity
+
+
+def _character_identity_annotation_lock(dataset_dir: Path, identity_id: Optional[str]):
+    """Serialize named-identity writes with catalog updates and deletion."""
+    if identity_id is None:
+        return nullcontext()
+    lock_path = _identity_catalog_lock_path(dataset_dir)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    return FileLock(str(lock_path), timeout=30)
 
 
 @dataclass(frozen=True)
@@ -533,19 +674,31 @@ def save_character_audio_intervals(
     intervals: Sequence[Sequence[float]],
     identity_id: Optional[str] = None,
 ) -> Path:
-    _require_character_identity(dataset_dir, identity_id)
-    paths = get_character_annotation_paths(
-        dataset_dir=dataset_dir,
-        media_path=media_path,
-        identity_id=identity_id,
-    )
     validated = validate_character_audio_intervals(list(intervals))
-    _write_json(
-        paths.audio,
-        {"character_intervals": [[start, end] for start, end in validated]},
-    )
-    invalidate_character_annotation_latents(media_path)
+    with _character_identity_annotation_lock(dataset_dir, identity_id):
+        _require_character_identity(dataset_dir, identity_id)
+        paths = get_character_annotation_paths(
+            dataset_dir=dataset_dir,
+            media_path=media_path,
+            identity_id=identity_id,
+        )
+        _write_json(
+            paths.audio,
+            {"character_intervals": [[start, end] for start, end in validated]},
+        )
+        invalidate_character_annotation_latents(media_path)
     return paths.audio
+
+
+def _write_character_visual_mask_file(paths: CharacterAnnotationPaths, binary_mask: np.ndarray) -> None:
+    paths.visual.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = paths.visual.with_suffix(paths.visual.suffix + ".tmp")
+    if paths.visual.suffix == ".png":
+        Image.fromarray(binary_mask[0] * 255, mode="L").save(temporary_path, format="PNG", optimize=True)
+    else:
+        with temporary_path.open("wb") as handle:
+            np.save(handle, binary_mask, allow_pickle=False)
+    temporary_path.replace(paths.visual)
 
 
 def save_character_visual_mask(
@@ -555,27 +708,21 @@ def save_character_visual_mask(
     mask: np.ndarray,
     identity_id: Optional[str] = None,
 ) -> Path:
-    _require_character_identity(dataset_dir, identity_id)
-    paths = get_character_annotation_paths(
-        dataset_dir=dataset_dir,
-        media_path=media_path,
-        identity_id=identity_id,
-    )
     mask = np.asarray(mask)
     if mask.ndim == 2:
         mask = mask[None]
     if mask.ndim != 3 or min(mask.shape) < 1:
         raise ValueError("character visual mask must have shape HW or THW")
     binary_mask = (mask > 0).astype(np.uint8)
-    paths.visual.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = paths.visual.with_suffix(paths.visual.suffix + ".tmp")
-    if paths.visual.suffix == ".png":
-        Image.fromarray(binary_mask[0] * 255, mode="L").save(temporary_path, format="PNG", optimize=True)
-    else:
-        with temporary_path.open("wb") as handle:
-            np.save(handle, binary_mask, allow_pickle=False)
-    temporary_path.replace(paths.visual)
-    invalidate_character_annotation_latents(media_path)
+    with _character_identity_annotation_lock(dataset_dir, identity_id):
+        _require_character_identity(dataset_dir, identity_id)
+        paths = get_character_annotation_paths(
+            dataset_dir=dataset_dir,
+            media_path=media_path,
+            identity_id=identity_id,
+        )
+        _write_character_visual_mask_file(paths, binary_mask)
+        invalidate_character_annotation_latents(media_path)
     return paths.visual
 
 
@@ -648,13 +795,22 @@ def track_character_visual_mask(
         initial_time_seconds,
         progress,
     )
-    save_character_visual_mask(
-        dataset_dir=dataset_dir,
-        media_path=media_path,
-        mask=mask,
-        identity_id=identity_id,
-    )
-    _write_json(paths.prompts, {"prompts": validated_prompts})
+    mask = np.asarray(mask)
+    if mask.ndim == 2:
+        mask = mask[None]
+    if mask.ndim != 3 or min(mask.shape) < 1:
+        raise ValueError("character visual mask must have shape HW or THW")
+    binary_mask = (mask > 0).astype(np.uint8)
+    with _character_identity_annotation_lock(dataset_dir, identity_id):
+        _require_character_identity(dataset_dir, identity_id)
+        paths = get_character_annotation_paths(
+            dataset_dir=dataset_dir,
+            media_path=media_path,
+            identity_id=identity_id,
+        )
+        _write_character_visual_mask_file(paths, binary_mask)
+        _write_json(paths.prompts, {"prompts": validated_prompts})
+        invalidate_character_annotation_latents(media_path)
     return get_character_annotation_state(
         dataset_dir=dataset_dir,
         media_path=media_path,

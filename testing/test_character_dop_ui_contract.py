@@ -78,11 +78,28 @@ class CharacterDOPUIContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("Character identities", source)
-        self.assertIn("request('save-identity'", source)
+        self.assertIn("request('update-identity'", source)
         self.assertIn("identityId: activeIdentityId", source)
         self.assertIn('aria-label="Character identity"', source)
         self.assertIn('placeholder="Trigger word"', source)
         self.assertIn('placeholder="Generic class prompt"', source)
+
+    def test_character_annotator_can_edit_and_delete_the_selected_identity(self):
+        source = (
+            Path(__file__).parents[1]
+            / "ui"
+            / "src"
+            / "components"
+            / "CharacterDOPAnnotator.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Update identity", source)
+        self.assertIn("request('save-identity'", source)
+        self.assertIn("Delete identity", source)
+        self.assertIn("request('delete-identity'", source)
+        self.assertIn("permanently deletes its masks", source)
+        self.assertIn("nextState.cleanup_pending", source)
+        self.assertIn("some staged files could not be removed", source)
 
     def test_character_annotator_persists_legacy_selection_and_ignores_stale_previews(self):
         source = (

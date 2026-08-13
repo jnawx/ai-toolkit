@@ -23,7 +23,7 @@ import {
   CreatableSelectInput,
 } from '@/components/formInputs';
 import Card from '@/components/Card';
-import { X, Copy, Wand2, SquareDashed, Info } from 'lucide-react';
+import { X, Copy, Wand2, SquareDashed, Info, RefreshCw } from 'lucide-react';
 import { openDoc } from '@/components/DocModal';
 import { openUpsamplePromptsModal, toAspectRatio } from '@/components/UpsamplePromptsModal';
 import { openPromptBoxEditor } from '@/components/PromptBoxEditorModal';
@@ -33,6 +33,7 @@ import { FlipHorizontal2, FlipVertical2 } from 'lucide-react';
 import { handleModelArchChange } from './utils';
 import { IoFlaskSharp } from 'react-icons/io5';
 import { isMac } from '@/helpers/basic';
+import { calculateDatasetBalance, type DatasetInventory } from './datasetBalance';
 
 type Props = {
   jobConfig: JobConfig;
@@ -44,6 +45,9 @@ type Props = {
   setGpuIDs: (value: string | null) => void;
   gpuList: any;
   datasetOptions: any;
+  datasetStats: Record<string, DatasetInventory>;
+  datasetStatsStatus: 'idle' | 'loading' | 'success' | 'error';
+  refreshDatasetStats: () => void;
   isLoading?: boolean;
 };
 
@@ -62,6 +66,9 @@ export default function SimpleJob({
   setGpuIDs,
   gpuList,
   datasetOptions,
+  datasetStats,
+  datasetStatsStatus,
+  refreshDatasetStats,
   isLoading,
 }: Props) {
   const modelArch = useMemo(() => {
@@ -85,6 +92,28 @@ export default function SimpleJob({
 
   const isVideoModel = !!(modelArch?.group === 'video');
   const isAudioModel = !!(modelArch?.group === 'audio');
+  const characterDopEnabled =
+    Boolean(jobConfig.config.process[0].train.diff_output_preservation) &&
+    jobConfig.config.process[0].train.diff_output_preservation_mode === 'character';
+  const datasetBalance = useMemo(
+    () => calculateDatasetBalance(
+      jobConfig.config.process[0].datasets,
+      datasetStats,
+      {
+        modelGroup: modelArch?.group,
+        characterDop: characterDopEnabled,
+        globalTrigger: Boolean(jobConfig.config.process[0].trigger_word?.trim()),
+      },
+    ),
+    [
+      datasetStats,
+      jobConfig.config.process[0].datasets,
+      characterDopEnabled,
+      jobConfig.config.process[0].trigger_word,
+      modelArch?.group,
+    ],
+  );
+  const totalEffectiveDatasetItems = datasetBalance.reduce((total, row) => total + row.effectiveItems, 0);
 
   const taggedSampleArr: Record<string, any>[] | null = useMemo(() => {
     if (!modelArch) return null;
@@ -1227,6 +1256,98 @@ export default function SimpleJob({
         <div>
           <Card title="Datasets">
             <>
+              <section className="mb-4 overflow-hidden rounded-lg border border-gray-700 bg-gray-900/60">
+                <div className="flex items-start justify-between gap-3 border-b border-gray-800 px-4 py-3">
+                  <div>
+                    <h2 className="font-semibold text-gray-100">Dataset balance</h2>
+                    <p className="mt-1 text-xs leading-relaxed text-gray-400">
+                      Estimated sampling after named Character DOP views, selected resolutions, repeats, and flips. Regularization and training use separate pools that alternate on eligible steps. LoRA weight does not change sampling share; it scales that dataset&apos;s network effect after selection.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={refreshDatasetStats}
+                    disabled={datasetStatsStatus === 'loading'}
+                    className="flex shrink-0 items-center gap-1.5 rounded border border-gray-700 px-2.5 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                    title="Refresh dataset inventory"
+                  >
+                    <RefreshCw size={14} className={datasetStatsStatus === 'loading' ? 'animate-spin' : ''} />
+                    Refresh
+                  </button>
+                </div>
+                {datasetStatsStatus === 'error' ? (
+                  <p className="px-4 py-3 text-xs text-red-300">Dataset inventory could not be loaded. Training settings are unaffected.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[760px] text-left text-xs">
+                      <thead className="bg-gray-950/70 text-gray-500">
+                        <tr>
+                          <th className="px-3 py-2 font-medium">Dataset</th>
+                          <th className="px-3 py-2 font-medium">Sources</th>
+                          <th className="px-3 py-2 font-medium">Character DOP views</th>
+                          <th className="px-3 py-2 font-medium">Res / repeats / flips</th>
+                          <th className="px-3 py-2 font-medium">Effective items</th>
+                          <th className="px-3 py-2 font-medium">Sampling share</th>
+                          <th className="px-3 py-2 font-medium">LoRA weight</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-800">
+                        {datasetBalance.map(row => (
+                          <tr key={`${row.index}-${row.path}`} className="text-gray-300">
+                            <td className="px-3 py-2.5">
+                              <div className="font-medium text-gray-200">{row.path.split(/[\\/]/).pop() || `Dataset ${row.index + 1}`}</div>
+                              <div className="mt-0.5 flex gap-1.5 text-[10px] uppercase tracking-wide text-gray-600">
+                                <span>#{row.index + 1}</span>
+                                {row.isRegularization && <span className="text-amber-400">regularization</span>}
+                              </div>
+                            </td>
+                            <td className="px-3 py-2.5">{row.sourceItems.toLocaleString()}</td>
+                            <td className="px-3 py-2.5">
+                              {row.usesCharacterViews ? (
+                                <span title={`${row.assignedSources} source item(s) assigned across ${row.identityCount} named identities`}>
+                                  {row.trainingViews.toLocaleString()}
+                                  {row.characterViews !== row.trainingViews && (
+                                    <span className="ml-1 text-gray-600">({row.characterViews} named)</span>
+                                  )}
+                                </span>
+                              ) : (
+                                <span className="text-gray-600">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              {row.resolutionFactor}× / {row.repeatFactor}× / {row.flipFactor}×
+                            </td>
+                            <td className="px-3 py-2.5 font-medium text-gray-100">{row.effectiveItems.toLocaleString()}</td>
+                            <td className="px-3 py-2.5">{(row.samplingShare * 100).toFixed(1)}%</td>
+                            <td className="px-3 py-2.5">{Number.isFinite(row.networkWeight) ? row.networkWeight : 'invalid'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot className="border-t border-gray-700 bg-gray-950/50 text-gray-400">
+                        <tr>
+                          <td className="px-3 py-2 font-medium" colSpan={4}>Expanded item inventory</td>
+                          <td className="px-3 py-2 font-semibold text-gray-200">{totalEffectiveDatasetItems.toLocaleString()}</td>
+                          <td className="px-3 py-2">{totalEffectiveDatasetItems > 0 ? '100.0%' : '—'}</td>
+                          <td className="px-3 py-2">—</td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                )}
+                {datasetStatsStatus === 'loading' && (
+                  <p className="border-t border-gray-800 px-4 py-2 text-xs text-gray-500">Scanning source media and Character DOP annotations…</p>
+                )}
+                {datasetBalance.some(row => row.unassignedCharacterSources > 0) && (
+                  <p className="border-t border-red-900 bg-red-950/30 px-4 py-2 text-xs text-red-200">
+                    Character DOP has no global fallback trigger, but {datasetBalance.reduce((total, row) => total + row.unassignedCharacterSources, 0)} selected source item(s) are not assigned to a named identity. Training will stop until they are annotated or a global trigger is provided.
+                  </p>
+                )}
+                {datasetBalance.some(row => row.error) && datasetStatsStatus === 'success' && (
+                  <p className="border-t border-amber-900 bg-amber-950/20 px-4 py-2 text-xs text-amber-200">
+                    Some inventory values are unavailable or have invalid Character DOP catalogs or annotations. Refresh after correcting those datasets.
+                  </p>
+                )}
+              </section>
               {jobConfig.config.process[0].datasets.map((dataset, i) => (
                 <div key={i} className="p-4 rounded-lg bg-gray-800 relative">
                   {isAudioOnlyDataset(dataset) && (

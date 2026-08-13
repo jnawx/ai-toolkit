@@ -5,14 +5,17 @@ import base64
 import io
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
 
 from toolkit.character_dop_annotation import (
     MAX_CHARACTER_IDENTITIES,
+    delete_character_identity,
     detect_character_instances,
     find_matching_character_visual_mask,
     get_character_mask_preview,
@@ -25,10 +28,278 @@ from toolkit.character_dop_annotation import (
     save_character_identity,
     save_character_visual_mask,
     track_character_visual_mask,
+    update_character_identity,
 )
 
 
 class CharacterDOPAnnotationStorageTests(unittest.TestCase):
+    def test_updating_identity_metadata_preserves_its_annotations(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "portrait.jpg"
+            Image.new("RGB", (4, 4)).save(media_path)
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="OldAliceToken",
+                class_prompt="a person",
+            )
+            mask_path = save_character_visual_mask(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="alice",
+                mask=np.ones((4, 4), dtype=np.uint8),
+            )
+
+            updated = update_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice Example",
+                trigger_word="AliceToken",
+                class_prompt="a woman",
+            )
+
+            self.assertEqual(
+                updated,
+                {
+                    "id": "alice",
+                    "display_name": "Alice Example",
+                    "trigger_word": "AliceToken",
+                    "class_prompt": "a woman",
+                },
+            )
+            self.assertTrue(mask_path.is_file())
+            self.assertTrue(
+                get_character_annotation_state(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id="alice",
+                )["visual"]["exists"]
+            )
+
+    def test_stale_identity_update_cannot_recreate_a_deleted_identity(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a person",
+            )
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                save_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id="alice",
+                    display_name="Alice overwritten",
+                    trigger_word="AliceOtherToken",
+                    class_prompt="a woman",
+                )
+            delete_character_identity(dataset_dir=dataset_dir, identity_id="alice")
+
+            with self.assertRaisesRegex(ValueError, "unknown character identity"):
+                update_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id="alice",
+                    display_name="Alice stale tab",
+                    trigger_word="AliceToken",
+                    class_prompt="a woman",
+                )
+
+            self.assertEqual(list_character_identities(dataset_dir), [])
+
+    def test_failed_catalog_commit_restores_staged_identity_annotations(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "portrait.jpg"
+            Image.new("RGB", (4, 4)).save(media_path)
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a person",
+            )
+            mask_path = save_character_visual_mask(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="alice",
+                mask=np.ones((4, 4), dtype=np.uint8),
+            )
+
+            with patch(
+                "toolkit.character_dop_annotation._write_character_identity_catalog",
+                side_effect=OSError("catalog unavailable"),
+            ):
+                with self.assertRaisesRegex(OSError, "catalog unavailable"):
+                    delete_character_identity(dataset_dir=dataset_dir, identity_id="alice")
+
+            self.assertTrue(mask_path.is_file())
+            self.assertEqual(list_character_identities(dataset_dir)[0]["id"], "alice")
+
+    def test_annotation_write_after_delete_cannot_recreate_identity_tree(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "voice.wav"
+            media_path.touch()
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a person",
+            )
+            delete_character_identity(dataset_dir=dataset_dir, identity_id="alice")
+
+            with self.assertRaisesRegex(ValueError, "unknown character identity"):
+                save_character_audio_intervals(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id="alice",
+                    intervals=[[0.0, 1.0]],
+                )
+
+            self.assertFalse(
+                (dataset_dir / "_character_dop" / "identities" / "alice").exists()
+            )
+
+    def test_delete_waits_for_in_progress_identity_annotation_write(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "voice.wav"
+            media_path.touch()
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a person",
+            )
+            write_started = threading.Event()
+            allow_write = threading.Event()
+            from toolkit import character_dop_annotation as annotation_module
+
+            original_write_json = annotation_module._write_json
+
+            def blocking_write_json(path, payload):
+                if path.name == "voice.json":
+                    write_started.set()
+                    self.assertTrue(allow_write.wait(timeout=5))
+                return original_write_json(path, payload)
+
+            with patch(
+                "toolkit.character_dop_annotation._write_json",
+                side_effect=blocking_write_json,
+            ), ThreadPoolExecutor(max_workers=2) as executor:
+                save_future = executor.submit(
+                    save_character_audio_intervals,
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id="alice",
+                    intervals=[[0.0, 1.0]],
+                )
+                self.assertTrue(write_started.wait(timeout=5))
+                delete_future = executor.submit(
+                    delete_character_identity,
+                    dataset_dir=dataset_dir,
+                    identity_id="alice",
+                )
+                self.assertFalse(delete_future.done())
+                allow_write.set()
+                save_future.result(timeout=5)
+                delete_future.result(timeout=5)
+
+            self.assertFalse(
+                (dataset_dir / "_character_dop" / "identities" / "alice").exists()
+            )
+
+    def test_deleting_identity_removes_only_its_catalog_entry_and_annotations(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "together.mp4"
+            media_path.touch()
+            for identity_id, trigger_word in (("alice", "AliceToken"), ("bob", "BobToken")):
+                save_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id=identity_id,
+                    display_name=identity_id.title(),
+                    trigger_word=trigger_word,
+                    class_prompt="a person",
+                )
+                save_character_audio_intervals(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id=identity_id,
+                    intervals=[[0.0, 1.0]],
+                )
+
+            result = delete_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+            )
+
+            self.assertEqual(result["deleted_identity"]["id"], "alice")
+            self.assertEqual(
+                [identity["id"] for identity in result["identities"]],
+                ["bob"],
+            )
+            self.assertFalse(
+                (dataset_dir / "_character_dop" / "identities" / "alice").exists()
+            )
+            self.assertTrue(
+                (dataset_dir / "_character_dop" / "identities" / "bob").is_dir()
+            )
+            with self.assertRaisesRegex(ValueError, "unknown character identity"):
+                get_character_annotation_state(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id="alice",
+                )
+
+    def test_delete_reports_when_staged_annotation_cleanup_is_pending(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "portrait.jpg"
+            Image.new("RGB", (4, 4)).save(media_path)
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a person",
+            )
+            save_character_visual_mask(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="alice",
+                mask=np.ones((4, 4), dtype=np.uint8),
+            )
+
+            with patch(
+                "toolkit.character_dop_annotation.shutil.rmtree",
+                side_effect=OSError("file is locked"),
+            ):
+                result = delete_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id="alice",
+                )
+
+            self.assertTrue(result["cleanup_pending"])
+            self.assertEqual(list_character_identities(dataset_dir), [])
+            self.assertTrue(
+                any(
+                    (dataset_dir / "_character_dop" / ".deleted-identities").iterdir()
+                )
+            )
+
     def test_concurrent_identity_writers_preserve_every_catalog_entry(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_dir = Path(tmp_dir) / "dataset"
@@ -630,6 +901,73 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
 
             self.assertEqual(state["identity"]["id"], "alice")
             self.assertEqual(state["identities"][0]["trigger_word"], "AliceToken")
+
+            updated = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "update-identity",
+                    "--dataset-dir",
+                    str(dataset_dir),
+                    "--media-path",
+                    str(media_path),
+                    "--payload-stdin",
+                ],
+                input=json.dumps(
+                    {
+                        "identity_id": "alice",
+                        "display_name": "Alice Example",
+                        "trigger_word": "AliceUpdatedToken",
+                        "class_prompt": "a person",
+                    }
+                ),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            updated_state = json.loads(updated.stdout.strip().splitlines()[-1])
+
+            self.assertEqual(updated_state["identity"]["display_name"], "Alice Example")
+            self.assertEqual(updated_state["identity"]["trigger_word"], "AliceUpdatedToken")
+
+    def test_ui_script_deletes_a_named_identity_and_selects_a_safe_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "portrait.jpg"
+            Image.new("RGB", (4, 4)).save(media_path)
+            for identity_id, trigger_word in (("alice", "AliceToken"), ("bob", "BobToken")):
+                save_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id=identity_id,
+                    display_name=identity_id.title(),
+                    trigger_word=trigger_word,
+                    class_prompt="a person",
+                )
+            script_path = Path(__file__).parents[1] / "ui_scripts" / "character_dop_annotator.py"
+
+            deleted = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "delete-identity",
+                    "--dataset-dir",
+                    str(dataset_dir),
+                    "--media-path",
+                    str(media_path),
+                    "--identity-id",
+                    "alice",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            state = json.loads(deleted.stdout.strip().splitlines()[-1])
+
+            self.assertEqual(state["deleted_identity"]["id"], "alice")
+            self.assertFalse(state["cleanup_pending"])
+            self.assertEqual(state["identity"]["id"], "bob")
+            self.assertEqual([identity["id"] for identity in state["identities"]], ["bob"])
 
     def test_ui_script_exposes_supported_character_mask_models(self):
         completed = subprocess.run(

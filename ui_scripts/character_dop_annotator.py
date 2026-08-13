@@ -8,12 +8,14 @@ if str(TOOLKIT_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLKIT_ROOT))
 
 from toolkit.character_dop_annotation import (
+    create_character_identity,
+    delete_character_identity,
     detect_character_instances,
     get_character_annotation_state,
     get_character_mask_preview,
     save_character_audio_intervals,
-    save_character_identity,
     track_character_visual_mask,
+    update_character_identity,
 )
 from toolkit.character_mask_models import (
     DEFAULT_SAM2_TRACKER_MODEL,
@@ -35,7 +37,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare built-in Character DOP annotations")
     parser.add_argument(
         "action",
-        choices=("models", "state", "save-identity", "save-audio", "detect", "track", "preview"),
+        choices=("models", "state", "save-identity", "update-identity", "delete-identity", "save-audio", "detect", "track", "preview"),
     )
     parser.add_argument("--dataset-dir")
     parser.add_argument("--media-path")
@@ -63,7 +65,7 @@ def main() -> None:
             identity_id=identity_id,
         )
     elif args.action == "save-identity":
-        identity = save_character_identity(
+        identity = create_character_identity(
             dataset_dir=dataset_dir,
             identity_id=payload.get("identity_id", ""),
             display_name=payload.get("display_name", ""),
@@ -75,6 +77,34 @@ def main() -> None:
             media_path=media_path,
             identity_id=identity["id"],
         )
+    elif args.action == "update-identity":
+        identity = update_character_identity(
+            dataset_dir=dataset_dir,
+            identity_id=payload.get("identity_id", ""),
+            display_name=payload.get("display_name", ""),
+            trigger_word=payload.get("trigger_word", ""),
+            class_prompt=payload.get("class_prompt", ""),
+        )
+        result = get_character_annotation_state(
+            dataset_dir=dataset_dir,
+            media_path=media_path,
+            identity_id=identity["id"],
+        )
+    elif args.action == "delete-identity":
+        deleted = delete_character_identity(
+            dataset_dir=dataset_dir,
+            identity_id=identity_id,
+        )
+        fallback_identity_id = (
+            deleted["identities"][0]["id"] if deleted["identities"] else None
+        )
+        result = get_character_annotation_state(
+            dataset_dir=dataset_dir,
+            media_path=media_path,
+            identity_id=fallback_identity_id,
+        )
+        result["deleted_identity"] = deleted["deleted_identity"]
+        result["cleanup_pending"] = deleted["cleanup_pending"]
     elif args.action == "save-audio":
         intervals = payload.get("intervals", args.intervals)
         if intervals is None:

@@ -13,7 +13,7 @@ export const maxDuration = 1200;
 
 const SCRIPT_PATH = path.join(TOOLKIT_ROOT, 'ui_scripts', 'character_dop_annotator.py');
 const TIMEOUT_MS = 20 * 60 * 1000;
-const ACTIONS = new Set(['models', 'state', 'save-identity', 'save-audio', 'detect', 'track', 'preview']);
+const ACTIONS = new Set(['models', 'state', 'save-identity', 'update-identity', 'delete-identity', 'save-audio', 'detect', 'track', 'preview']);
 const MAX_ANNOTATOR_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_ANNOTATOR_ERROR_BYTES = 1024 * 1024;
 const MAX_ANNOTATOR_INPUT_BYTES = 32 * 1024 * 1024;
@@ -189,7 +189,7 @@ export async function POST(request: Request) {
     args.push('--identity-id', body.identityId);
   }
   let payload: Record<string, unknown> | undefined;
-  if (body.action === 'save-identity') {
+  if (body.action === 'save-identity' || body.action === 'update-identity') {
     args.push('--payload-stdin');
     payload = {
       identity_id: body.identityId,

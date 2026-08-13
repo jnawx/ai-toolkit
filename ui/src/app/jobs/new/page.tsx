@@ -11,6 +11,7 @@ import { SelectInput } from '@/components/formInputs';
 import useSettings from '@/hooks/useSettings';
 import useGPUInfo from '@/hooks/useGPUInfo';
 import useDatasetList from '@/hooks/useDatasetList';
+import useDatasetStats from '@/hooks/useDatasetStats';
 import YAML from 'yaml';
 import path from 'path';
 import { TopBar, MainContent } from '@/components/layout';
@@ -36,6 +37,10 @@ export default function TrainingForm() {
   const [showAdvancedView, setShowAdvancedView] = useState(false);
 
   const [jobConfig, setJobConfig] = useNestedState<JobConfig>(objectCopy(migrateJobConfig(defaultJobConfig)));
+  const selectedDatasetPaths = jobConfig.config.process[0].datasets
+    .map(dataset => dataset.folder_path)
+    .filter(datasetPath => Boolean(datasetPath?.trim()));
+  const { stats: datasetStats, status: datasetStatsStatus, refresh: refreshDatasetStats } = useDatasetStats(selectedDatasetPaths);
   const [status, setStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -324,6 +329,9 @@ export default function TrainingForm() {
               setGpuIDs={setGpuIDs}
               gpuList={gpuList}
               datasetOptions={datasetOptions}
+              datasetStats={datasetStats}
+              datasetStatsStatus={datasetStatsStatus}
+              refreshDatasetStats={refreshDatasetStats}
               isLoading={!isSettingsLoaded || !isGPUInfoLoaded || datasetFetchStatus !== 'success'}
             />
           </ErrorBoundary>

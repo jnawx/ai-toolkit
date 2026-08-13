@@ -189,6 +189,9 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
   const [newIdentityName, setNewIdentityName] = useState('');
   const [newIdentityTrigger, setNewIdentityTrigger] = useState('');
   const [newIdentityClass, setNewIdentityClass] = useState('a person');
+  const [editIdentityName, setEditIdentityName] = useState('');
+  const [editIdentityTrigger, setEditIdentityTrigger] = useState('');
+  const [editIdentityClass, setEditIdentityClass] = useState('');
   const [prompts, setPrompts] = useState<CharacterPrompt[]>([]);
   const [intervals, setIntervals] = useState<SpeakingInterval[]>([]);
   const [pointLabel, setPointLabel] = useState<0 | 1>(1);
@@ -333,6 +336,17 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       void context?.close();
     };
   }, [open, hasTimeline, mediaSrc]);
+
+  useEffect(() => {
+    setEditIdentityName(state?.identity?.display_name ?? '');
+    setEditIdentityTrigger(state?.identity?.trigger_word ?? '');
+    setEditIdentityClass(state?.identity?.class_prompt ?? '');
+  }, [
+    state?.identity?.id,
+    state?.identity?.display_name,
+    state?.identity?.trigger_word,
+    state?.identity?.class_prompt,
+  ]);
 
   const frameIndex = useMemo(() => {
     const count = state?.visual?.shape?.[0] ?? 1;
@@ -546,6 +560,79 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     }
   };
 
+  const updateIdentity = async () => {
+    if (!state?.identity || !editIdentityName.trim() || !editIdentityTrigger.trim() || !editIdentityClass.trim()) {
+      setError('Display name, trigger word, and generic class prompt are required.');
+      return;
+    }
+    const previousTrigger = state.identity.trigger_word;
+    setBusy('identity');
+    setError(null);
+    try {
+      const nextState: AnnotationState = await request('update-identity', {
+        identityId: state.identity.id,
+        displayName: editIdentityName.trim(),
+        triggerWord: editIdentityTrigger.trim(),
+        classPrompt: editIdentityClass.trim(),
+      });
+      setState(nextState);
+      setMessage(
+        previousTrigger === nextState.identity?.trigger_word
+          ? `Updated ${nextState.identity?.display_name}. Existing masks and speaking intervals were preserved.`
+          : `Updated ${nextState.identity?.display_name}. Existing masks and speaking intervals were preserved. Update dataset captions that still use “${previousTrigger}”.`,
+      );
+    } catch (reason: any) {
+      setError(reason?.response?.data?.error || reason.message || 'Character identity could not be updated');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const deleteIdentity = async () => {
+    if (!state?.identity) return;
+    const identity = state.identity;
+    const confirmed = window.confirm(
+      `Delete ${identity.display_name}? This permanently deletes its masks, speaking intervals, and saved prompts across the entire dataset. This cannot be undone.`,
+    );
+    if (!confirmed) return;
+    setBusy('identity');
+    setError(null);
+    try {
+      const nextState: AnnotationState & {
+        deleted_identity: CharacterIdentity;
+        cleanup_pending: boolean;
+      } = await request('delete-identity', {
+        identityId: identity.id,
+      });
+      const fallbackIdentityId = nextState.identity?.id ?? null;
+      identitySelectionInitializedRef.current = true;
+      setActiveIdentityId(fallbackIdentityId);
+      try {
+        window.localStorage.setItem(
+          characterIdentityStorageKey(datasetName),
+          fallbackIdentityId ?? CHARACTER_DOP_LEGACY_IDENTITY,
+        );
+      } catch {
+        // The fallback remains selected for this session when storage is unavailable.
+      }
+      setState(nextState);
+      setPrompts(nextState.prompts ?? []);
+      setIntervals(nextState.audio?.intervals ?? []);
+      setPreview(null);
+      setDetection(null);
+      setSelectedCandidateIds([]);
+      setMessage(
+        nextState.cleanup_pending
+          ? `Deleted ${nextState.deleted_identity.display_name}. Its annotations are no longer usable, but some staged files could not be removed; restart the toolkit and remove the dataset's _character_dop/.deleted-identities folder if they remain.`
+          : `Deleted ${nextState.deleted_identity.display_name} and its Character DOP annotations.`,
+      );
+    } catch (reason: any) {
+      setError(reason?.response?.data?.error || reason.message || 'Character identity could not be deleted');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <Dialog open={open} onClose={() => !busy && onClose()} className="relative z-[70]">
       <DialogBackdrop className="fixed inset-0 bg-black/80" />
@@ -687,6 +774,57 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                     </option>
                   ))}
                 </select>
+                {state?.identity && (
+                  <div className="space-y-2 rounded border border-gray-800 bg-gray-950/70 p-2.5">
+                    <p className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Edit selected identity</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        value={editIdentityName}
+                        onChange={event => setEditIdentityName(event.target.value)}
+                        aria-label="Selected identity display name"
+                        placeholder="Display name"
+                        className="min-w-0 rounded border border-gray-700 bg-gray-900 px-2.5 py-2 text-gray-100"
+                      />
+                      <input
+                        value={editIdentityTrigger}
+                        onChange={event => setEditIdentityTrigger(event.target.value)}
+                        aria-label="Selected identity trigger word"
+                        placeholder="Trigger word"
+                        className="min-w-0 rounded border border-gray-700 bg-gray-900 px-2.5 py-2 text-gray-100"
+                      />
+                      <input
+                        value={editIdentityClass}
+                        onChange={event => setEditIdentityClass(event.target.value)}
+                        aria-label="Selected identity generic class prompt"
+                        placeholder="Generic class prompt"
+                        className="col-span-2 min-w-0 rounded border border-gray-700 bg-gray-900 px-2.5 py-2 text-gray-100"
+                      />
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-amber-300/80">
+                      Changing a trigger does not rewrite caption files. Replace the old trigger in your captions before training.
+                    </p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        disabled={Boolean(busy) || !editIdentityName.trim() || !editIdentityTrigger.trim() || !editIdentityClass.trim()}
+                        onClick={updateIdentity}
+                        className="flex items-center justify-center gap-1.5 rounded border border-violet-700 px-2 py-2 text-xs text-violet-200 hover:bg-violet-950/50 disabled:opacity-40"
+                      >
+                        {busy === 'identity' ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                        Update identity
+                      </button>
+                      <button
+                        type="button"
+                        disabled={Boolean(busy)}
+                        onClick={deleteIdentity}
+                        className="flex items-center justify-center gap-1.5 rounded border border-red-800 px-2 py-2 text-xs text-red-300 hover:bg-red-950/40 disabled:opacity-40"
+                      >
+                        <Trash2 size={14} /> Delete identity
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <p className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Add a new identity</p>
                 <div className="grid grid-cols-2 gap-2">
                   <input
                     value={newIdentityName}

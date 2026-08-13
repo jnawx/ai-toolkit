@@ -121,6 +121,24 @@ class SDTrainer(BaseSDTrainProcess):
 
     def before_model_load(self):
         pass
+
+    def get_blank_control_image(self):
+        # noise instead of a black image so the fallback does not read as a
+        # meaningful (solid black) reference
+        control_image = torch.rand((1, 3, 224, 224), device=self.sd.device_torch, dtype=self.sd.torch_dtype)
+        if self.sd.has_multiple_control_images:
+            control_image = [control_image]
+        return control_image
+
+    def encode_static_prompt(self, prompt, **kwargs):
+        # static embeds (blank/trigger/uncond/DOP class) are always plain text.
+        # Some models (edit models) cannot encode a prompt without control images
+        # and raise, only then fall back to a blank control image. Real errors
+        # surface on the fallback call.
+        try:
+            return self.sd.encode_prompt(prompt, **kwargs)
+        except Exception:
+            return self.sd.encode_prompt(prompt, control_images=self.get_blank_control_image(), **kwargs)
     
     def cache_sample_prompts(self):
         if self.train_config.disable_sampling:
@@ -260,18 +278,9 @@ class SDTrainer(BaseSDTrainProcess):
         
         # cache unconditional embeds (blank prompt)
         with torch.no_grad():
-            kwargs = {}
-            if self.sd.encode_control_in_text_embeddings:
-                # just do a blank image for unconditionals
-                control_image = torch.zeros((1, 3, 224, 224), device=self.sd.device_torch, dtype=self.sd.torch_dtype)
-                if self.sd.has_multiple_control_images:
-                    control_image = [control_image]
-                
-                kwargs['control_images'] = control_image
-            self.unconditional_embeds = self.sd.encode_prompt(
+            self.unconditional_embeds = self.encode_static_prompt(
                 [self.train_config.unconditional_prompt],
                 long_prompts=self.do_long_prompts,
-                **kwargs
             ).to(
                 self.device_torch,
                 dtype=self.sd.torch_dtype
@@ -325,18 +334,11 @@ class SDTrainer(BaseSDTrainProcess):
                     raise ValueError("Cannot unload text encoder if training text encoder")
                 # cache embeddings
                 self.sd.text_encoder_to(self.device_torch)
-                encode_kwargs = {}
-                if self.sd.encode_control_in_text_embeddings:
-                    # just do a blank image for unconditionals
-                    control_image = torch.zeros((1, 3, 224, 224), device=self.sd.device_torch, dtype=self.sd.torch_dtype)
-                    if self.sd.has_multiple_control_images:
-                        control_image = [control_image]
-                    encode_kwargs['control_images'] = control_image
-                self.cached_blank_embeds = self.sd.encode_prompt("", **encode_kwargs)
+                self.cached_blank_embeds = self.encode_static_prompt("")
                 if self.trigger_word is not None:
-                    self.cached_trigger_embeds = self.sd.encode_prompt(self.trigger_word, **encode_kwargs)
+                    self.cached_trigger_embeds = self.encode_static_prompt(self.trigger_word)
                 if self.train_config.diff_output_preservation:
-                    self.cached_dop_class_embeds = self.sd.encode_prompt(self.train_config.diff_output_preservation_class)
+                    self.cached_dop_class_embeds = self.encode_static_prompt(self.train_config.diff_output_preservation_class)
                     self.diff_output_preservation_embeds = self.cached_dop_class_embeds
                 
                 self.cache_sample_prompts()
@@ -1048,6 +1050,8 @@ class SDTrainer(BaseSDTrainProcess):
                 )
             audio_loss = audio_loss.mean()
             audio_loss = audio_loss * self.train_config.audio_loss_multiplier
+            self.additional_logs['loss/img'] = loss.item()
+            self.additional_logs['loss/audio'] = audio_loss.item()
             loss = loss + audio_loss
 
         # check for additional losses
@@ -2016,6 +2020,18 @@ class SDTrainer(BaseSDTrainProcess):
                     else:
                         self.adapter.set_reference_images(None)
 
+                if self.train_config.do_guidance_loss and isinstance(self.train_config.guidance_loss_target, list):
+                    batch_size = noisy_latents.shape[0]
+                    # update the guidance value, random float between guidance_loss_target[0] and guidance_loss_target[1]
+                    # sample before the prior prediction so the prior, main, uncond, and
+                    # preservation passes all run at the same guidance values
+                    self._guidance_loss_target_batch = [
+                        random.uniform(
+                            self.train_config.guidance_loss_target[0],
+                            self.train_config.guidance_loss_target[1]
+                        ) for _ in range(batch_size)
+                    ]
+
                 prior_pred = None
 
                 do_inverted_masked_prior = False
@@ -2123,16 +2139,6 @@ class SDTrainer(BaseSDTrainProcess):
                                 pred_kwargs['down_block_additional_residuals'] = down_block_res_samples
                                 pred_kwargs['mid_block_additional_residual'] = mid_block_res_sample
                 
-                if self.train_config.do_guidance_loss and isinstance(self.train_config.guidance_loss_target, list):
-                    batch_size = noisy_latents.shape[0]
-                    # update the guidance value, random float between guidance_loss_target[0] and guidance_loss_target[1]
-                    self._guidance_loss_target_batch = [
-                        random.uniform(
-                            self.train_config.guidance_loss_target[0],
-                            self.train_config.guidance_loss_target[1]
-                        ) for _ in range(batch_size)
-                    ]
-
                 self.before_unet_predict()
                 
                 if unconditional_embeds is not None:

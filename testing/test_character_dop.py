@@ -623,6 +623,7 @@ class CharacterTrainingIntegrationTests(unittest.TestCase):
         trainer.sd = FakeModel()
         trainer.dfe = None
         trainer.adapter = None
+        trainer.additional_logs = {}
 
         loss = trainer.calculate_loss(
             noise_pred=torch.zeros((1, 1, 1, 1)),

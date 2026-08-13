@@ -2243,11 +2243,17 @@ class TextEmbeddingFileItemDTOMixin:
         # diff output preservation embeds (caption with trigger word replaced by class)
         self.dop_prompt_embeds: Union[PromptEmbeds, None] = None
         self._dop_text_embedding_path: Union[str, None] = None
+        # blank caption embeds used for caption dropout when caching text embeddings
+        self._blank_text_embedding_path: Union[str, None] = None
+        # DOP embeds for dropout steps (dropout caption with trigger replaced by class)
+        self._dop_blank_text_embedding_path: Union[str, None] = None
+        self._loaded_text_embedding_path: Union[str, None] = None
+        self._caption_was_dropped = False
         self.is_text_embedding_cached = False
         self.text_embedding_load_device = 'cpu'
         self.text_embedding_version = 1
 
-    def get_text_embedding_info_dict(self: 'FileItemDTO', caption_override=None):
+    def get_text_embedding_info_dict(self: 'FileItemDTO', caption_override=None, text_only=False):
         # make sure the caption is loaded here
         # TODO: we need a way to cache all the other features like trigger words, DOP, etc. For now, we need to throw an error if not compatible.
         if self.caption is None:
@@ -2257,6 +2263,10 @@ class TextEmbeddingFileItemDTOMixin:
             ("text_embedding_space_version", self.text_embedding_space_version),
             ("text_embedding_version", self.text_embedding_version),
         ])
+        # dropout embeds are encoded as plain text, keep control conditioning
+        # out of their cache key
+        if text_only:
+            return item
         # if we have a control image, cache the path
         if self.encode_control_in_text_embeddings and self.control_path is not None:
             item["control_path"] = self.control_path
@@ -2269,11 +2279,11 @@ class TextEmbeddingFileItemDTOMixin:
             item["first_frame_in_te"] = True
         return item
 
-    def _build_text_embedding_path(self: 'FileItemDTO', caption_override=None):
+    def _build_text_embedding_path(self: 'FileItemDTO', caption_override=None, text_only=False):
         # we store text embeddings in a folder in same path as image called _text_embedding_cache
         img_dir = os.path.dirname(self.path)
         te_dir = os.path.join(img_dir, '_t_e_cache')
-        hash_dict = self.get_text_embedding_info_dict(caption_override=caption_override)
+        hash_dict = self.get_text_embedding_info_dict(caption_override=caption_override, text_only=text_only)
         filename_no_ext = os.path.splitext(os.path.basename(self.path))[0]
         # get base64 hash of md5 checksum of hash_dict
         hash_input = json.dumps(hash_dict, sort_keys=True).encode('utf-8')
@@ -2304,6 +2314,50 @@ class TextEmbeddingFileItemDTOMixin:
 
         return self._dop_text_embedding_path
 
+    def get_dropout_caption(self: 'FileItemDTO'):
+        # when encoding live, dropped captions still get the trigger word injected
+        # downstream (add_if_not_present when not a reg image), so match that here
+        if self.trigger_word is not None and not self.is_reg:
+            return inject_trigger_into_prompt('', trigger=self.trigger_word, add_if_not_present=True)
+        return ''
+
+    def get_dop_dropout_caption(self: 'FileItemDTO'):
+        # live encoding replaces the trigger word with the preservation class on the
+        # dropped caption (class only), so the cached DOP dropout caption must match
+        dropout_caption = self.get_dropout_caption()
+        if self.trigger_word is not None:
+            return dropout_caption.replace(
+                self.trigger_word, self.dataset_config.diff_output_preservation_class
+            )
+        return dropout_caption
+
+    def get_dop_blank_text_embedding_path(self: 'FileItemDTO', recalculate=False):
+        if self._dop_blank_text_embedding_path is not None and not recalculate:
+            return self._dop_blank_text_embedding_path
+        else:
+            # if the DOP dropout caption matches the dropout caption, this hashes to
+            # the same path as the blank embedding and the cache file is shared.
+            # text_only: dropout embeds carry no control conditioning
+            self._dop_blank_text_embedding_path = self._build_text_embedding_path(
+                caption_override=self.get_dop_dropout_caption(), text_only=True
+            )
+
+        return self._dop_blank_text_embedding_path
+
+    def get_blank_text_embedding_path(self: 'FileItemDTO', recalculate=False):
+        if self._blank_text_embedding_path is not None and not recalculate:
+            return self._blank_text_embedding_path
+        else:
+            # if the dropout caption matches the normal caption (and the item has no
+            # control conditioning), this hashes to the same path as the normal
+            # embedding and the cache file is shared.
+            # text_only: dropout embeds carry no control conditioning
+            self._blank_text_embedding_path = self._build_text_embedding_path(
+                caption_override=self.get_dropout_caption(), text_only=True
+            )
+
+        return self._blank_text_embedding_path
+
     def cleanup_text_embedding(self):
         if self.prompt_embeds is not None:
             # we are caching on disk, don't save in memory
@@ -2315,11 +2369,26 @@ class TextEmbeddingFileItemDTOMixin:
         if not self.is_text_embedding_cached:
             return
         if self.prompt_embeds is None:
+            te_path = self.get_text_embedding_path()
+            self._caption_was_dropped = False
+            if self.dataset_config.caption_dropout_rate > 0:
+                # get a random float form 0 to 1
+                rand = random.random()
+                if rand < self.dataset_config.caption_dropout_rate:
+                    # drop the caption by using the cached blank embedding
+                    te_path = self.get_blank_text_embedding_path()
+                    self._caption_was_dropped = True
             # load it from disk
-            self.prompt_embeds = PromptEmbeds.load(self.get_text_embedding_path())
+            self.prompt_embeds = PromptEmbeds.load(te_path)
+            self._loaded_text_embedding_path = te_path
         if self.dataset_config.diff_output_preservation and self.dop_prompt_embeds is None:
-            dop_path = self.get_dop_text_embedding_path()
-            if dop_path == self.get_text_embedding_path():
+            if self._caption_was_dropped:
+                # match live encoding, which builds the DOP caption from the
+                # dropped caption (trigger word replaced with the class)
+                dop_path = self.get_dop_blank_text_embedding_path()
+            else:
+                dop_path = self.get_dop_text_embedding_path()
+            if dop_path == self._loaded_text_embedding_path:
                 # no trigger word in caption, same embedding
                 self.dop_prompt_embeds = self.prompt_embeds
             else:
@@ -2352,6 +2421,20 @@ class TextEmbeddingCachingMixin:
                     if dop_path != text_embedding_path:
                         # trigger word was in the caption, cache the DOP version too
                         encode_targets.append((dop_path, file_item.caption_dop))
+                # dropout embeds are encoded as plain text (no control images)
+                dropout_target_paths = set()
+                if self.dataset_config.caption_dropout_rate > 0:
+                    blank_path = file_item.get_blank_text_embedding_path(recalculate=True)
+                    if blank_path != text_embedding_path:
+                        # cache the dropout caption embedding (blank, or trigger word only)
+                        encode_targets.append((blank_path, file_item.get_dropout_caption()))
+                        dropout_target_paths.add(blank_path)
+                    if self.dataset_config.diff_output_preservation:
+                        # cache the DOP version of the dropout caption (class only)
+                        dop_blank_path = file_item.get_dop_blank_text_embedding_path(recalculate=True)
+                        if dop_blank_path not in [t[0] for t in encode_targets] + [text_embedding_path]:
+                            encode_targets.append((dop_blank_path, file_item.get_dop_dropout_caption()))
+                            dropout_target_paths.add(dop_blank_path)
                 # only process if not saved to disk
                 encode_targets = [t for t in encode_targets if not os.path.exists(t[0])]
                 if len(encode_targets) > 0:
@@ -2387,7 +2470,15 @@ class TextEmbeddingCachingMixin:
                         else:
                             ctrl_img = ctrl_img_list
                         for path, caption in encode_targets:
-                            prompt_embeds: PromptEmbeds = self.sd.encode_prompt(caption, control_images=ctrl_img)
+                            if path in dropout_target_paths:
+                                # dropout embeds are plain text. Only fall back to the
+                                # control images if the model cannot encode without them
+                                try:
+                                    prompt_embeds: PromptEmbeds = self.sd.encode_prompt(caption)
+                                except Exception:
+                                    prompt_embeds: PromptEmbeds = self.sd.encode_prompt(caption, control_images=ctrl_img)
+                            else:
+                                prompt_embeds: PromptEmbeds = self.sd.encode_prompt(caption, control_images=ctrl_img)
                             prompt_embeds.save(path)
                             del prompt_embeds
                     elif (
@@ -2410,7 +2501,15 @@ class TextEmbeddingCachingMixin:
                         if self.sd.has_multiple_control_images:
                             ctrl_img = [ctrl_img]
                         for path, caption in encode_targets:
-                            prompt_embeds: PromptEmbeds = self.sd.encode_prompt(caption, control_images=ctrl_img)
+                            if path in dropout_target_paths:
+                                # dropout embeds are plain text. Only fall back to the
+                                # control images if the model cannot encode without them
+                                try:
+                                    prompt_embeds: PromptEmbeds = self.sd.encode_prompt(caption)
+                                except Exception:
+                                    prompt_embeds: PromptEmbeds = self.sd.encode_prompt(caption, control_images=ctrl_img)
+                            else:
+                                prompt_embeds: PromptEmbeds = self.sd.encode_prompt(caption, control_images=ctrl_img)
                             prompt_embeds.save(path)
                             del prompt_embeds
                         file_item.tensor = None

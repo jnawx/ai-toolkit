@@ -47,56 +47,33 @@ const jointCount = (dataset, inventory, identityId, selectedIds) =>
   }, 0);
 
 const buildSources = (identity, selectedIds, datasets, inventories) => datasets
-  .filter(dataset => !dataset.is_reg && dataset.character_dop_use_dataset_annotations !== false)
-  .map(dataset => {
+  .map((dataset, index) => ({ dataset, index }))
+  .filter(({ dataset }) => !dataset.is_reg && dataset.character_dop_use_dataset_annotations !== false)
+  .map(({ dataset, index }) => {
     const inventory = findInventory(dataset.folder_path, inventories);
     const coverage = inventory?.identities?.find(item => item.id === identity.id);
     const factor = augmentationFactor(dataset);
     const modalities = coverage ? coverageByModality(dataset, coverage) : [];
     const focusCount = modalities.reduce((sum, item) => sum + item.coverage.sources, 0) * factor;
     const sharedCount = inventory ? jointCount(dataset, inventory, identity.id, selectedIds) * factor : 0;
-    return { dataset, modalities, factor, focusCount, jointCount: sharedCount };
+    return {
+      dataset,
+      index,
+      sourceKey: normalizedPath(dataset.folder_path),
+      modalities,
+      factor,
+      focusCount,
+      jointCount: sharedCount,
+    };
   });
 
-/** Exact source marginal implied by runtime mode/context sampling for one identity. */
-export function calculateCharacterIdentitySourceShares(
-  identity,
-  selectedIds,
-  jointFraction,
-  datasets,
-  inventories,
-) {
-  const sources = buildSources(identity, selectedIds, datasets, inventories);
-  const shares = new Map(sources.map(source => [source.dataset.folder_path, 0]));
-  const candidateCount = source => source.focusCount + (jointFraction > 0 ? source.jointCount : 0);
-  const eligible = sources.filter(source => candidateCount(source) > 0);
-  if (identity.source_weights) {
-    const explicit = new Map(
-      Object.entries(identity.source_weights)
-        .filter(([path]) => path !== '*')
-        .map(([path, weight]) => [normalizedPath(path), Number(weight)]),
-    );
-    const explicitTotal = [...explicit.values()].reduce((sum, weight) => sum + weight, 0);
-    const remainder = Number(identity.source_weights['*'] ?? Math.max(0, 1 - explicitTotal));
-    const automaticCount = eligible.reduce(
-      (sum, source) => sum + (explicit.has(normalizedPath(source.dataset.folder_path)) ? 0 : candidateCount(source)), 0,
-    );
-    for (const source of eligible) {
-      const value = explicit.get(normalizedPath(source.dataset.folder_path))
-        ?? (automaticCount > 0 ? remainder * candidateCount(source) / automaticCount : 0);
-      shares.set(source.dataset.folder_path, value);
-    }
-    return shares;
-  }
-
-  const jointTotal = eligible.reduce((sum, source) => sum + source.jointCount, 0);
-  if (jointFraction > 0 && jointTotal > 0) {
-    for (const source of eligible) {
-      shares.set(source.dataset.folder_path, jointFraction * source.jointCount / jointTotal);
-    }
+const buildRows = (identity, jointFraction, sources) => {
+  const rows = [];
+  if (jointFraction > 0) {
+    rows.push({ target: jointFraction, counts: sources.map(source => source.jointCount) });
   }
   const modalityTotals = new Map();
-  for (const source of eligible) {
+  for (const source of sources) {
     for (const item of source.modalities) {
       modalityTotals.set(item.modality, (modalityTotals.get(item.modality) ?? 0) + item.coverage.sources * source.factor);
     }
@@ -104,26 +81,145 @@ export function calculateCharacterIdentitySourceShares(
   const focusTotal = [...modalityTotals.values()].reduce((sum, count) => sum + count, 0);
   for (const [modality, modalityCount] of modalityTotals) {
     if (modalityCount <= 0 || focusTotal <= 0) continue;
-    const modalityShare = (1 - jointFraction) * modalityCount / focusTotal;
-    const soloCount = eligible.reduce((sum, source) => sum + source.modalities
+    const modalityTarget = (1 - jointFraction) * modalityCount / focusTotal;
+    const contextCounts = context => sources.map(source => source.modalities
       .filter(item => item.modality === modality)
-      .reduce((subtotal, item) => subtotal + item.coverage.solo * source.factor, 0), 0);
-    const groupCount = eligible.reduce((sum, source) => sum + source.modalities
-      .filter(item => item.modality === modality)
-      .reduce((subtotal, item) => subtotal + item.coverage.group * source.factor, 0), 0);
+      .reduce((sum, item) => sum + item.coverage[context] * source.factor, 0));
+    const soloCounts = contextCounts('solo');
+    const groupCounts = contextCounts('group');
+    const soloTotal = soloCounts.reduce((sum, count) => sum + count, 0);
+    const groupTotal = groupCounts.reduce((sum, count) => sum + count, 0);
     const soloFraction = identity.context_fractions?.[modality]
       ?? identity.solo_fraction
-      ?? (soloCount + groupCount > 0 ? soloCount / (soloCount + groupCount) : 0);
-    for (const source of eligible) {
-      const scoped = source.modalities.filter(item => item.modality === modality);
-      const sourceSolo = scoped.reduce((sum, item) => sum + item.coverage.solo * source.factor, 0);
-      const sourceGroup = scoped.reduce((sum, item) => sum + item.coverage.group * source.factor, 0);
-      const contribution = modalityShare * (
-        (soloCount > 0 ? soloFraction * sourceSolo / soloCount : 0)
-        + (groupCount > 0 ? (1 - soloFraction) * sourceGroup / groupCount : 0)
-      );
-      shares.set(source.dataset.folder_path, (shares.get(source.dataset.folder_path) ?? 0) + contribution);
+      ?? (soloTotal + groupTotal > 0 ? soloTotal / (soloTotal + groupTotal) : 0);
+    if (soloFraction > 0) rows.push({ target: modalityTarget * soloFraction, counts: soloCounts });
+    if (soloFraction < 1) rows.push({ target: modalityTarget * (1 - soloFraction), counts: groupCounts });
+  }
+  return rows;
+};
+
+const buildSourceTargets = (identity, sources) => {
+  const sourceCandidates = new Map();
+  for (const source of sources) {
+    const count = source.focusCount + source.jointCount;
+    if (count > 0) sourceCandidates.set(source.sourceKey, (sourceCandidates.get(source.sourceKey) ?? 0) + count);
+  }
+  if (!identity.source_weights) {
+    const total = [...sourceCandidates.values()].reduce((sum, count) => sum + count, 0);
+    return new Map([...sourceCandidates].map(([key, count]) => [key, total > 0 ? count / total : 0]));
+  }
+  const explicit = new Map(
+    Object.entries(identity.source_weights)
+      .filter(([path]) => path !== '*')
+      .map(([path, weight]) => [normalizedPath(path), Number(weight)]),
+  );
+  const explicitTotal = [...explicit.values()].reduce((sum, weight) => sum + weight, 0);
+  const remainder = Number(identity.source_weights['*'] ?? Math.max(0, 1 - explicitTotal));
+  const automaticCount = [...sourceCandidates].reduce(
+    (sum, [key, count]) => sum + (explicit.has(key) ? 0 : count), 0,
+  );
+  return new Map([...sourceCandidates].map(([key, count]) => [
+    key,
+    explicit.get(key) ?? (automaticCount > 0 ? remainder * count / automaticCount : 0),
+  ]));
+};
+
+const solveCharacterMix = (identity, selectedIds, jointFraction, datasets, inventories) => {
+  const sources = buildSources(identity, selectedIds, datasets, inventories);
+  const rows = buildRows(identity, jointFraction, sources);
+  const cells = rows.map(row => [...row.counts]);
+
+  if (!identity.source_weights) {
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+      const total = cells[rowIndex].reduce((sum, mass) => sum + mass, 0);
+      if (rows[rowIndex].target > 0 && total <= 0) return { feasible: false, shares: new Map() };
+      cells[rowIndex] = cells[rowIndex].map(mass => total > 0 ? rows[rowIndex].target * mass / total : 0);
     }
+  } else {
+    const sourceTargets = buildSourceTargets(identity, sources);
+    const eligibleKeys = new Set(sources
+      .filter(source => source.focusCount + source.jointCount > 0)
+      .map(source => source.sourceKey));
+    for (const [rawPath, rawWeight] of Object.entries(identity.source_weights)) {
+      if (rawPath !== '*' && Number(rawWeight) > 0 && !eligibleKeys.has(normalizedPath(rawPath))) {
+        return { feasible: false, shares: new Map() };
+      }
+    }
+    for (let iteration = 0; iteration < 500; iteration++) {
+      for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+        const current = cells[rowIndex].reduce((sum, mass) => sum + mass, 0);
+        if (rows[rowIndex].target > 0 && current <= 0) return { feasible: false, shares: new Map() };
+        const scale = current > 0 ? rows[rowIndex].target / current : 0;
+        cells[rowIndex] = cells[rowIndex].map(mass => mass * scale);
+      }
+      for (const [sourceKey, target] of sourceTargets) {
+        let current = 0;
+        for (const row of cells) {
+          for (let column = 0; column < sources.length; column++) {
+            if (sources[column].sourceKey === sourceKey) current += row[column];
+          }
+        }
+        if (target > 0 && current <= 0) return { feasible: false, shares: new Map() };
+        const scale = current > 0 ? target / current : 0;
+        for (const row of cells) {
+          for (let column = 0; column < sources.length; column++) {
+            if (sources[column].sourceKey === sourceKey) row[column] *= scale;
+          }
+        }
+      }
+      const rowError = Math.max(0, ...rows.map((row, index) =>
+        Math.abs(cells[index].reduce((sum, mass) => sum + mass, 0) - row.target)));
+      const sourceError = Math.max(0, ...[...sourceTargets].map(([sourceKey, target]) => {
+        let current = 0;
+        for (const row of cells) {
+          for (let column = 0; column < sources.length; column++) {
+            if (sources[column].sourceKey === sourceKey) current += row[column];
+          }
+        }
+        return Math.abs(current - target);
+      }));
+      if (Math.max(rowError, sourceError) <= 1e-7) break;
+      if (iteration === 499) return { feasible: false, shares: new Map() };
+    }
+  }
+
+  const shares = new Map(sources.map(source => [source.index, 0]));
+  for (const row of cells) {
+    for (let column = 0; column < sources.length; column++) {
+      shares.set(sources[column].index, (shares.get(sources[column].index) ?? 0) + row[column]);
+    }
+  }
+  return { feasible: true, shares };
+};
+
+/** Exact per-config marginal implied by runtime mode/context/source sampling. */
+export function calculateCharacterIdentityDatasetShares(
+  identity,
+  selectedIds,
+  jointFraction,
+  datasets,
+  inventories,
+) {
+  return solveCharacterMix(identity, selectedIds, jointFraction, datasets, inventories).shares;
+}
+
+/** Exact path-level source marginal; duplicate configs remain one source control. */
+export function calculateCharacterIdentitySourceShares(
+  identity,
+  selectedIds,
+  jointFraction,
+  datasets,
+  inventories,
+) {
+  const datasetShares = calculateCharacterIdentityDatasetShares(
+    identity, selectedIds, jointFraction, datasets, inventories,
+  );
+  const shares = new Map();
+  for (const [index, share] of datasetShares) {
+    const path = datasets[index].folder_path;
+    const existing = [...shares.keys()].find(key => normalizedPath(key) === normalizedPath(path));
+    const key = existing ?? path;
+    shares.set(key, (shares.get(key) ?? 0) + share);
   }
   return shares;
 }
@@ -137,66 +233,5 @@ export function characterSourceMixIsFeasible(
   inventories,
 ) {
   if (!identity.source_weights) return true;
-  const sources = buildSources(identity, selectedIds, datasets, inventories);
-  const sourceTargets = calculateCharacterIdentitySourceShares(
-    identity, selectedIds, jointFraction, datasets, inventories,
-  );
-  const rows = [];
-  if (jointFraction > 0) {
-    rows.push({
-      target: jointFraction,
-      counts: new Map(sources.map(source => [source.dataset.folder_path, source.jointCount])),
-    });
-  }
-  const modalityTotals = new Map();
-  for (const source of sources) {
-    for (const item of source.modalities) {
-      modalityTotals.set(item.modality, (modalityTotals.get(item.modality) ?? 0) + item.coverage.sources * source.factor);
-    }
-  }
-  const focusTotal = [...modalityTotals.values()].reduce((sum, count) => sum + count, 0);
-  for (const [modality, modalityCount] of modalityTotals) {
-    if (modalityCount <= 0 || focusTotal <= 0) continue;
-    const modalityTarget = (1 - jointFraction) * modalityCount / focusTotal;
-    const contextCounts = context => new Map(sources.map(source => [
-      source.dataset.folder_path,
-      source.modalities
-        .filter(item => item.modality === modality)
-        .reduce((sum, item) => sum + item.coverage[context] * source.factor, 0),
-    ]));
-    const soloCounts = contextCounts('solo');
-    const groupCounts = contextCounts('group');
-    const soloTotal = [...soloCounts.values()].reduce((sum, count) => sum + count, 0);
-    const groupTotal = [...groupCounts.values()].reduce((sum, count) => sum + count, 0);
-    const soloFraction = identity.context_fractions?.[modality]
-      ?? identity.solo_fraction
-      ?? (soloTotal + groupTotal > 0 ? soloTotal / (soloTotal + groupTotal) : 0);
-    if (soloFraction > 0) rows.push({ target: modalityTarget * soloFraction, counts: soloCounts });
-    if (soloFraction < 1) rows.push({ target: modalityTarget * (1 - soloFraction), counts: groupCounts });
-  }
-  const sourcePaths = sources
-    .map(source => source.dataset.folder_path)
-    .filter(path => (sourceTargets.get(path) ?? 0) > 0);
-  const cells = rows.map(row => sourcePaths.map(path => Number(row.counts.get(path) ?? 0)));
-  for (let iteration = 0; iteration < 500; iteration++) {
-    for (let row = 0; row < rows.length; row++) {
-      const current = cells[row].reduce((sum, mass) => sum + mass, 0);
-      if (rows[row].target > 0 && current <= 0) return false;
-      const scale = current > 0 ? rows[row].target / current : 0;
-      cells[row] = cells[row].map(mass => mass * scale);
-    }
-    for (let column = 0; column < sourcePaths.length; column++) {
-      const target = Number(sourceTargets.get(sourcePaths[column]) ?? 0);
-      const current = cells.reduce((sum, row) => sum + row[column], 0);
-      if (target > 0 && current <= 0) return false;
-      const scale = current > 0 ? target / current : 0;
-      for (const row of cells) row[column] *= scale;
-    }
-    const rowError = Math.max(...rows.map((row, index) =>
-      Math.abs(cells[index].reduce((sum, mass) => sum + mass, 0) - row.target)));
-    const sourceError = Math.max(...sourcePaths.map((path, column) =>
-      Math.abs(cells.reduce((sum, row) => sum + row[column], 0) - Number(sourceTargets.get(path) ?? 0))));
-    if (Math.max(rowError, sourceError) <= 1e-7) return true;
-  }
-  return false;
+  return solveCharacterMix(identity, selectedIds, jointFraction, datasets, inventories).feasible;
 }

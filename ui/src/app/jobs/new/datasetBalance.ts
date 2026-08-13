@@ -1,4 +1,4 @@
-import { calculateCharacterIdentitySourceShares } from './characterSourceShares.mjs';
+import { calculateCharacterIdentityDatasetShares } from './characterSourceShares.mjs';
 
 export type DatasetMediaInventory = {
   sources: number;
@@ -243,16 +243,14 @@ export function calculateDatasetBalance(
     );
     for (const identity of options.characterTraining.identities) {
       const identityShare = totalIdentityWeight > 0 ? Number(identity.weight) / totalIdentityWeight : 0;
-      const sourceShares = calculateCharacterIdentitySourceShares(
+      const sourceShares = calculateCharacterIdentityDatasetShares(
         identity,
         selectedIds,
         Number(options.characterTraining.joint_training_fraction ?? 0),
         datasets,
         statsByPath,
       );
-      for (const [sourcePath, sourceShare] of sourceShares) {
-        const sourceIndex = datasets.findIndex(dataset => normalizedPath(dataset.folder_path) === normalizedPath(sourcePath));
-        if (sourceIndex < 0) continue;
+      for (const [sourceIndex, sourceShare] of sourceShares) {
         curriculumShares.set(
           sourceIndex,
           (curriculumShares.get(sourceIndex) ?? 0) + identityShare * sourceShare,

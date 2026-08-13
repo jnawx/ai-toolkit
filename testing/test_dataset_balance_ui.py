@@ -453,6 +453,35 @@ console.log(JSON.stringify(calculateDatasetBalance(datasets, {{ '/a': inventory(
         self.assertAlmostEqual(rows[0]["samplingShare"], 20 / 21)
         self.assertAlmostEqual(rows[1]["samplingShare"], 1 / 21)
 
+    def test_duplicate_dataset_configs_keep_separate_augmented_shares(self):
+        module_path = (
+            Path(__file__).parents[1] / "ui" / "src" / "app" / "jobs" / "new" / "datasetBalance.ts"
+        ).resolve()
+        script = f"""
+import {{ pathToFileURL }} from 'node:url';
+const {{ calculateDatasetBalance }} = await import(pathToFileURL({json.dumps(str(module_path))}).href);
+const media = {{ sources: 1, solo: 1, group: 0 }};
+const empty = {{ sources: 0, solo: 0, group: 0 }};
+const dataset = repeats => ({{ folder_path: '/same', resolution: [512], num_frames: 1, num_repeats: repeats, flip_x: false, flip_y: false, network_weight: 1, is_reg: false }});
+const inventory = {{ path: '/same', identityCount: 1,
+  identities: [{{ id: 'alice', images: media, videos: empty, videosVisual: empty, videosAudio: empty, audio: empty }}],
+  images: {{ sources: 1, assignedSources: 1, characterViews: 1 }},
+  videos: {{ sources: 0, assignedSources: 0, characterViews: 0 }}, audio: {{ sources: 0, assignedSources: 0, characterViews: 0 }}
+}};
+console.log(JSON.stringify(calculateDatasetBalance([dataset(1), dataset(10)], {{ '/same': inventory }}, {{
+  characterDop: true, globalTrigger: false,
+  characterTraining: {{ identities: [{{ id: 'alice', weight: 1 }}], joint_training_fraction: 0 }}
+}})));
+"""
+        completed = subprocess.run(
+            ["node", "--experimental-strip-types", "--input-type=module", "-e", script],
+            check=True, capture_output=True, text=True,
+        )
+        rows = json.loads(completed.stdout)
+
+        self.assertAlmostEqual(rows[0]["samplingShare"], 1 / 11)
+        self.assertAlmostEqual(rows[1]["samplingShare"], 10 / 11)
+
     def test_joint_view_projection_requires_two_selected_identities_on_the_source(self):
         module_path = (
             Path(__file__).parents[1] / "ui" / "src" / "app" / "jobs" / "new" / "datasetBalance.ts"

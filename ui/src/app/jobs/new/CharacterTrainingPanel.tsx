@@ -62,6 +62,10 @@ export default function CharacterTrainingPanel({
   const trainingDatasets = datasets.filter(
     dataset => !dataset.is_reg && dataset.folder_path.trim() && dataset.character_dop_use_dataset_annotations !== false,
   );
+  const sourceControlDatasets = trainingDatasets.filter((dataset, index, items) => {
+    const normalized = dataset.folder_path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    return items.findIndex(item => item.folder_path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === normalized) === index;
+  });
   const selected = new Map(strategy.identities.map(identity => [identity.id, identity]));
   const selectedIds = new Set(strategy.identities.map(identity => identity.id));
   const recommendedSoloFraction = (identityId: string) => {
@@ -102,7 +106,7 @@ export default function CharacterTrainingPanel({
   const totalWeight = strategy.identities.reduce((sum, identity) => sum + Number(identity.weight || 0), 0);
   const targetSourceShares = useMemo(() => {
     const normalize = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-    const shares = new Map(trainingDatasets.map(dataset => [dataset.folder_path, 0]));
+    const shares = new Map(sourceControlDatasets.map(dataset => [dataset.folder_path, 0]));
     if (totalWeight <= 0) return shares;
     for (const selectedIdentity of strategy.identities) {
       const identityShare = Number(selectedIdentity.weight) / totalWeight;
@@ -119,7 +123,7 @@ export default function CharacterTrainingPanel({
       }
     }
     return shares;
-  }, [inventories, strategy.identities, strategy.joint_training_fraction, totalWeight, trainingDatasets]);
+  }, [inventories, sourceControlDatasets, strategy.identities, strategy.joint_training_fraction, totalWeight, trainingDatasets]);
 
   const coverageFor = (identityId: string) => trainingDatasets.reduce((total, dataset) => {
     const inventory = inventories[dataset.folder_path]
@@ -199,7 +203,7 @@ export default function CharacterTrainingPanel({
                     <div className="mb-1 text-xs font-medium text-gray-300">Dataset source mix</div>
                     <p className="mb-2 text-[11px] text-gray-500">Set only the sources you need to control. Blank sources share the automatic remainder according to their available annotations.</p>
                     <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                      {trainingDatasets.map(dataset => (
+                      {sourceControlDatasets.map(dataset => (
                         <label key={dataset.folder_path} className="flex items-center justify-between gap-2 rounded border border-gray-800 px-2 py-1.5 text-xs text-gray-400">
                           <span className="truncate" title={dataset.folder_path}>{dataset.folder_path.split(/[\\/]/).pop()}</span>
                           <span><input className={`${inputClass} w-16`} type="number" min="0" max="100" placeholder="Auto" value={config.source_weights?.[dataset.folder_path] == null ? '' : Math.round(config.source_weights[dataset.folder_path] * 100)} onChange={event => setSourcePercent(config, dataset.folder_path, event.target.value)} />%</span>
@@ -227,7 +231,7 @@ export default function CharacterTrainingPanel({
           <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
             <div className="mb-2 text-xs font-medium text-gray-300">Effective target source share</div>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {trainingDatasets.map(dataset => (
+              {sourceControlDatasets.map(dataset => (
                 <div key={dataset.folder_path} className="flex items-center justify-between gap-2 text-xs text-gray-400">
                   <span className="truncate" title={dataset.folder_path}>{dataset.folder_path.split(/[\\/]/).pop()}</span>
                   <span className="font-medium text-gray-200">{((targetSourceShares.get(dataset.folder_path) ?? 0) * 100).toFixed(1)}%</span>

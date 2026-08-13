@@ -196,6 +196,10 @@ class CharacterDOPUIContractTests(unittest.TestCase):
         self.assertNotIn("> Annotate Character DOP", viewer)
         self.assertIn("Caption for this media", annotator)
         self.assertIn("onShowStandardDetails", annotator)
+        self.assertIn("captionLoaded={isCaptionLoaded}", viewer)
+        self.assertIn("disabled={!captionLoaded}", annotator)
+        self.assertIn("Boolean(busy) || !hasPrevious", annotator)
+        self.assertIn("Boolean(busy) || !hasNext", annotator)
 
     def test_job_screen_explains_single_and_multi_identity_trigger_paths(self):
         simple_job = (
@@ -210,6 +214,9 @@ class CharacterDOPUIContractTests(unittest.TestCase):
         self.assertIn("Multiple trigger words", simple_job)
         self.assertIn("Character identities &amp; trigger words", curriculum)
         self.assertIn("Selected trigger words", curriculum)
+        self.assertIn("characterSourceMixIsFeasible", curriculum)
+        self.assertIn("Source mix cannot be equalized", curriculum)
+        self.assertIn("{ identities: [], joint_training_fraction: 0 }", simple_job)
 
     def test_dataset_overview_has_direct_and_automatic_balance_controls(self):
         simple_job = (

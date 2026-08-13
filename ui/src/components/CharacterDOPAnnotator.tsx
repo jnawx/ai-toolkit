@@ -77,6 +77,7 @@ type Props = {
   onCaptionChange?: (caption: string) => void;
   onCaptionSave?: () => void;
   captionSaved?: boolean;
+  captionLoaded?: boolean;
   onShowStandardDetails?: () => void;
   onPrevious?: () => void;
   onNext?: () => void;
@@ -204,6 +205,7 @@ export default function CharacterDOPAnnotator({
   onCaptionChange,
   onCaptionSave,
   captionSaved = true,
+  captionLoaded = true,
   onShowStandardDetails,
   onPrevious,
   onNext,
@@ -774,10 +776,10 @@ export default function CharacterDOPAnnotator({
               <p className="truncate text-xs text-gray-500">{mediaPath.split(/[\\/]/).pop()}</p>
             </div>
             {mediaPosition && <span className="text-xs text-gray-500">{mediaPosition}</span>}
-            <button type="button" className="rounded p-1.5 text-gray-400 hover:bg-gray-800 hover:text-white disabled:opacity-30" onClick={onPrevious} disabled={!hasPrevious} title="Previous media">
+            <button type="button" className="rounded p-1.5 text-gray-400 hover:bg-gray-800 hover:text-white disabled:opacity-30" onClick={onPrevious} disabled={Boolean(busy) || !hasPrevious} title="Previous media">
               <ChevronLeft size={18} />
             </button>
-            <button type="button" className="rounded p-1.5 text-gray-400 hover:bg-gray-800 hover:text-white disabled:opacity-30" onClick={onNext} disabled={!hasNext} title="Next media">
+            <button type="button" className="rounded p-1.5 text-gray-400 hover:bg-gray-800 hover:text-white disabled:opacity-30" onClick={onNext} disabled={Boolean(busy) || !hasNext} title="Next media">
               <ChevronRight size={18} />
             </button>
             {onShowStandardDetails && (
@@ -880,17 +882,18 @@ export default function CharacterDOPAnnotator({
                   <div className="flex items-center justify-between gap-2">
                     <h3 className="font-medium text-gray-100">Caption for this media</h3>
                     <span className={`text-[11px] ${captionSaved ? 'text-gray-500' : 'text-blue-300'}`}>
-                      {captionSaved ? 'Saved' : 'Unsaved changes'}
+                      {!captionLoaded ? 'Loading…' : captionSaved ? 'Saved' : 'Unsaved changes'}
                     </span>
                   </div>
                   <textarea
                     value={captionText}
                     onChange={event => onCaptionChange(event.target.value)}
                     onBlur={onCaptionSave}
+                    disabled={!captionLoaded}
                     className="min-h-28 w-full rounded border border-gray-700 bg-gray-950 px-2.5 py-2 text-gray-100 outline-none focus:border-violet-500"
                     placeholder="Describe the scene and use each selected identity's trigger word."
                   />
-                  <button type="button" onClick={onCaptionSave} disabled={captionSaved} className="flex w-full items-center justify-center gap-1.5 rounded border border-gray-700 px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-40">
+                  <button type="button" onClick={onCaptionSave} disabled={!captionLoaded || captionSaved} className="flex w-full items-center justify-center gap-1.5 rounded border border-gray-700 px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-40">
                     <Save size={14} /> Save caption
                   </button>
                 </section>

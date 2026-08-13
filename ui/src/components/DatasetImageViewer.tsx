@@ -705,6 +705,7 @@ export default function DatasetImageViewer({
                   onCaptionChange={setCaption}
                   onCaptionSave={saveCaption}
                   captionSaved={isCaptionCurrent}
+                  captionLoaded={isCaptionLoaded}
                   onShowStandardDetails={() => {
                     setShowCharacterAnnotator(false);
                     setOverlayRevision(current => current + 1);

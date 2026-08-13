@@ -317,6 +317,10 @@ export default function SimpleJob({
                       onClick={() => {
                         setJobConfig(true, 'config.process[0].train.diff_output_preservation');
                         setJobConfig('character', 'config.process[0].train.diff_output_preservation_mode');
+                        setJobConfig(
+                          { identities: [], joint_training_fraction: 0 },
+                          'config.process[0].train.character_training',
+                        );
                       }}
                     >
                       Enable multi-character training
@@ -962,6 +966,12 @@ export default function SimpleJob({
                                   value ? 'character' : 'standard',
                                   'config.process[0].train.diff_output_preservation_mode',
                                 );
+                                if (value && !jobConfig.config.process[0].train.character_training) {
+                                  setJobConfig(
+                                    { identities: [], joint_training_fraction: 0 },
+                                    'config.process[0].train.character_training',
+                                  );
+                                }
                                 if (!value) {
                                   setJobConfig(
                                     undefined,

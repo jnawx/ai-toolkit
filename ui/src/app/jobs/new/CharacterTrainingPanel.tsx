@@ -7,7 +7,7 @@ import CharacterIdentityManager, { type CharacterIdentity } from '@/components/C
 import type { CharacterTrainingConfig, CharacterTrainingIdentityConfig, DatasetConfig } from '@/types';
 import { apiClient } from '@/utils/api';
 import type { DatasetInventory } from './datasetBalance';
-import { calculateCharacterIdentitySourceShares } from './characterSourceShares.mjs';
+import { calculateCharacterIdentitySourceShares, characterSourceMixIsFeasible } from './characterSourceShares.mjs';
 import { validateCharacterTrainingCoverage } from './characterTrainingBalance';
 
 type Props = {
@@ -148,9 +148,8 @@ export default function CharacterTrainingPanel({
   };
 
   const equalizeSourceMix = () => {
-    onChange({
-      ...strategy,
-      identities: strategy.identities.map(identity => {
+    const blocked: string[] = [];
+    const nextIdentities = strategy.identities.map(identity => {
         const automatic = calculateCharacterIdentitySourceShares(
           { ...identity, source_weights: undefined },
           selectedIds,
@@ -163,15 +162,30 @@ export default function CharacterTrainingPanel({
           .map(([path]) => path);
         if (!eligiblePaths.length) return identity;
         const equalShare = 1 / eligiblePaths.length;
-        return {
+        const proposed = {
           ...identity,
           source_weights: {
             ...Object.fromEntries(eligiblePaths.map(path => [path, equalShare])),
             '*': 0,
           },
         };
-      }),
-    });
+        if (!characterSourceMixIsFeasible(
+          proposed,
+          selectedIds,
+          strategy.joint_training_fraction,
+          trainingDatasets,
+          inventories,
+        )) {
+          blocked.push(identities.find(item => item.id === identity.id)?.display_name ?? identity.id);
+        }
+        return proposed;
+      });
+    if (blocked.length) {
+      setError(`Source mix cannot be equalized for ${blocked.join(', ')} while preserving the requested solo/group and joint percentages. Adjust those percentages or set feasible source percentages manually.`);
+      return;
+    }
+    setError(null);
+    onChange({ ...strategy, identities: nextIdentities });
     setAdvanced(true);
   };
 

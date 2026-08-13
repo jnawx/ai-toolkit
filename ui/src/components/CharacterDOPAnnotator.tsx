@@ -592,7 +592,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     if (!state?.identity) return;
     const identity = state.identity;
     const confirmed = window.confirm(
-      `Delete ${identity.display_name}? This permanently deletes its masks, speaking intervals, and saved prompts across the entire dataset. This cannot be undone.`,
+      `Delete ${identity.display_name} everywhere? This permanently deletes the shared identity and its masks, speaking intervals, and saved prompts across every dataset. This cannot be undone.`,
     );
     if (!confirmed) return;
     setBusy('identity');
@@ -601,6 +601,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       const nextState: AnnotationState & {
         deleted_identity: CharacterIdentity;
         cleanup_pending: boolean;
+        cleanup_errors?: string[];
       } = await request('delete-identity', {
         identityId: identity.id,
       });
@@ -623,8 +624,8 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       setSelectedCandidateIds([]);
       setMessage(
         nextState.cleanup_pending
-          ? `Deleted ${nextState.deleted_identity.display_name}. Its annotations are no longer usable, but some staged files could not be removed; restart the toolkit and remove the dataset's _character_dop/.deleted-identities folder if they remain.`
-          : `Deleted ${nextState.deleted_identity.display_name} and its Character DOP annotations.`,
+          ? `Deleted ${nextState.deleted_identity.display_name}. Its annotations are ignored by training, but some files could not be removed. Restart the toolkit, then remove leftover identity files from the affected datasets' _character_dop folders if they remain.`
+          : `Deleted ${nextState.deleted_identity.display_name} and its Character DOP annotations from every dataset.`,
       );
     } catch (reason: any) {
       setError(reason?.response?.data?.error || reason.message || 'Character identity could not be deleted');
@@ -738,7 +739,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                 <div>
                   <h3 className="font-medium text-gray-100">Character identities</h3>
                   <p className="mt-1 text-[11px] leading-relaxed text-gray-500">
-                    Select which identity this mask and speaking track belong to. One shared file becomes a separate protected training view for every annotated identity.
+                    Identity definitions are shared across all datasets. Masks and speaking tracks remain specific to the dataset and media you annotate.
                   </p>
                 </div>
                 <select
@@ -801,7 +802,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                       />
                     </div>
                     <p className="text-[11px] leading-relaxed text-amber-300/80">
-                      Changing a trigger does not rewrite caption files. Replace the old trigger in your captions before training.
+                      Changing a trigger does not rewrite caption files. Replace the old trigger in captions across every affected dataset before training.
                     </p>
                     <div className="grid grid-cols-2 gap-2">
                       <button

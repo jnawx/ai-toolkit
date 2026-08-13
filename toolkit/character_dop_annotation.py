@@ -6,7 +6,7 @@ import re
 import shutil
 import tempfile
 import uuid
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -21,6 +21,8 @@ from toolkit.character_mask_models import validate_character_mask_model
 
 
 ANNOTATION_DIRECTORY = "_character_dop"
+SHARED_IDENTITY_CATALOG = "_character_dop_identities.json"
+SHARED_IDENTITY_LOCK = ".character_dop_identities.lock"
 VISUAL_MASK_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 MAX_AUTO_MASK_EDGE = 768
 MAX_AUTO_MASK_COUNT = 64
@@ -112,9 +114,7 @@ def _read_character_identity_catalog(
     return json.loads(Path(catalog_path).read_text(encoding="utf-8"))
 
 
-def list_character_identities(dataset_dir: Path) -> list[dict]:
-    """Return the dataset's named character identities in display order."""
-    catalog_path = _identity_catalog_path(dataset_dir)
+def _list_character_identities_at_path(catalog_path: Path) -> list[dict]:
     if not catalog_path.exists():
         return []
     stat = catalog_path.stat()
@@ -175,6 +175,83 @@ def list_character_identities(dataset_dir: Path) -> list[dict]:
     return [dict(identity) for identity in identities]
 
 
+def list_character_identities(dataset_dir: Path) -> list[dict]:
+    """Return identities activated for one dataset in display order."""
+    dataset_dir = Path(dataset_dir).resolve(strict=True)
+    local_identities = _list_character_identities_at_path(_identity_catalog_path(dataset_dir))
+    shared_catalog = next(
+        (
+            _annotation_storage_path(ancestor, SHARED_IDENTITY_CATALOG)
+            for ancestor in dataset_dir.parents
+            if (ancestor / SHARED_IDENTITY_CATALOG).exists()
+        ),
+        None,
+    )
+    if shared_catalog is None:
+        return local_identities
+    shared_identities = _list_character_identities_at_path(shared_catalog)
+    shared_by_id = {identity["id"]: identity for identity in shared_identities}
+    return [
+        dict(shared_by_id[identity["id"]])
+        for identity in local_identities
+        if identity["id"] in shared_by_id
+    ]
+
+
+def _list_local_character_identities(dataset_dir: Path) -> list[dict]:
+    return _list_character_identities_at_path(_identity_catalog_path(dataset_dir))
+
+
+def _resolved_datasets_root(datasets_root: Path, dataset_dir: Optional[Path] = None) -> Path:
+    root = Path(datasets_root).resolve(strict=True)
+    if dataset_dir is not None:
+        dataset = Path(dataset_dir).resolve(strict=True)
+        try:
+            dataset.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("character annotation dataset must be inside the datasets root") from exc
+        if dataset == root:
+            raise ValueError("character annotation dataset cannot be the datasets root")
+    return root
+
+
+def _shared_identity_catalog_path(datasets_root: Path) -> Path:
+    root = _resolved_datasets_root(datasets_root)
+    return _annotation_storage_path(root, SHARED_IDENTITY_CATALOG)
+
+
+def _shared_identity_lock_path(datasets_root: Path) -> Path:
+    root = _resolved_datasets_root(datasets_root)
+    return _annotation_storage_path(root, SHARED_IDENTITY_LOCK)
+
+
+def _identity_conflict(identities: Sequence[dict], identity: dict) -> Optional[str]:
+    trigger_key = identity["trigger_word"].casefold()
+    for existing in identities:
+        if existing["id"] == identity["id"]:
+            continue
+        existing_key = existing["trigger_word"].casefold()
+        if existing_key == trigger_key:
+            return f"character identity trigger word is already used by {existing['display_name']}"
+        if existing_key in trigger_key or trigger_key in existing_key:
+            return (
+                "character identity trigger words cannot contain one another because "
+                "DOP replaces one active trigger at a time"
+            )
+    return None
+
+
+def _validated_identity(
+    *, identity_id: str, display_name: str, trigger_word: str, class_prompt: str
+) -> dict:
+    return {
+        "id": _validate_identity_id(identity_id),
+        "display_name": _required_identity_text(display_name, "display name"),
+        "trigger_word": _required_identity_text(trigger_word, "trigger word"),
+        "class_prompt": _required_identity_text(class_prompt, "class prompt"),
+    }
+
+
 def _write_character_identity_catalog(catalog_path: Path, identities: list[dict]) -> None:
     payload = {
         "version": CHARACTER_IDENTITY_CATALOG_VERSION,
@@ -188,42 +265,19 @@ def _write_character_identity_catalog(catalog_path: Path, identities: list[dict]
     _read_character_identity_catalog.cache_clear()
 
 
-def _save_character_identity(
+def _save_identity_catalog_entry(
     *,
-    dataset_dir: Path,
-    identity_id: str,
-    display_name: str,
-    trigger_word: str,
-    class_prompt: str,
+    catalog_path: Path,
+    lock_path: Path,
+    identity: dict,
     require_existing: Optional[bool],
 ) -> dict:
-    identity = {
-        "id": _validate_identity_id(identity_id),
-        "display_name": _required_identity_text(display_name, "display name"),
-        "trigger_word": _required_identity_text(trigger_word, "trigger word"),
-        "class_prompt": _required_identity_text(class_prompt, "class prompt"),
-    }
-    catalog_path = _identity_catalog_path(dataset_dir)
-    lock_path = _identity_catalog_lock_path(dataset_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(str(lock_path), timeout=30):
-        identities = list_character_identities(dataset_dir)
-        for existing in identities:
-            if (
-                existing["id"] != identity["id"]
-                and existing["trigger_word"].casefold() == identity["trigger_word"].casefold()
-            ):
-                raise ValueError(
-                    f"character identity trigger word is already used by {existing['display_name']}"
-                )
-            if existing["id"] != identity["id"] and (
-                existing["trigger_word"].casefold() in identity["trigger_word"].casefold()
-                or identity["trigger_word"].casefold() in existing["trigger_word"].casefold()
-            ):
-                raise ValueError(
-                    "character identity trigger words cannot contain one another because "
-                    "DOP replaces one active trigger at a time"
-                )
+        identities = _list_character_identities_at_path(catalog_path)
+        conflict = _identity_conflict(identities, identity)
+        if conflict:
+            raise ValueError(conflict)
         matching_index = next(
             (index for index, existing in enumerate(identities) if existing["id"] == identity["id"]),
             None,
@@ -241,7 +295,125 @@ def _save_character_identity(
         else:
             identities[matching_index] = identity
         _write_character_identity_catalog(catalog_path, identities)
-    return identity
+    return dict(identity)
+
+
+def _save_character_identity(
+    *,
+    dataset_dir: Path,
+    identity_id: str,
+    display_name: str,
+    trigger_word: str,
+    class_prompt: str,
+    require_existing: Optional[bool],
+) -> dict:
+    identity = _validated_identity(
+        identity_id=identity_id,
+        display_name=display_name,
+        trigger_word=trigger_word,
+        class_prompt=class_prompt,
+    )
+    return _save_identity_catalog_entry(
+        catalog_path=_identity_catalog_path(dataset_dir),
+        lock_path=_identity_catalog_lock_path(dataset_dir),
+        identity=identity,
+        require_existing=require_existing,
+    )
+
+
+def _legacy_identity_catalogs(datasets_root: Path) -> list[list[dict]]:
+    """Find direct child dataset catalogs without following links outside the root."""
+    root = _resolved_datasets_root(datasets_root)
+    catalogs = []
+    for entry in root.iterdir():
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        try:
+            entry.resolve(strict=True).relative_to(root)
+        except (OSError, ValueError):
+            continue
+        identities = _list_local_character_identities(entry)
+        if identities:
+            catalogs.append(identities)
+    return catalogs
+
+
+def list_available_character_identities(datasets_root: Path) -> list[dict]:
+    """Return workspace identities, migrating existing dataset catalogs once."""
+    catalog_path = _shared_identity_catalog_path(datasets_root)
+    lock_path = _shared_identity_lock_path(datasets_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(lock_path), timeout=30):
+        if catalog_path.exists():
+            return _list_character_identities_at_path(catalog_path)
+        identities = []
+        for legacy_identities in _legacy_identity_catalogs(datasets_root):
+            for identity in legacy_identities:
+                existing = next(
+                    (candidate for candidate in identities if candidate["id"] == identity["id"]),
+                    None,
+                )
+                if existing is not None:
+                    if existing != identity:
+                        raise ValueError(
+                            f"conflicting character identity definitions found for {identity['id']}"
+                        )
+                    continue
+                conflict = _identity_conflict(identities, identity)
+                if conflict:
+                    raise ValueError(conflict)
+                if len(identities) >= MAX_CHARACTER_IDENTITIES:
+                    raise ValueError(
+                        f"character identity catalog supports at most {MAX_CHARACTER_IDENTITIES} identities"
+                    )
+                identities.append(identity)
+        if identities:
+            _write_character_identity_catalog(catalog_path, identities)
+        return [dict(identity) for identity in identities]
+
+
+def create_shared_character_identity(
+    *,
+    datasets_root: Path,
+    identity_id: str,
+    display_name: str,
+    trigger_word: str,
+    class_prompt: str,
+) -> dict:
+    list_available_character_identities(datasets_root)
+    return _save_identity_catalog_entry(
+        catalog_path=_shared_identity_catalog_path(datasets_root),
+        lock_path=_shared_identity_lock_path(datasets_root),
+        identity=_validated_identity(
+            identity_id=identity_id,
+            display_name=display_name,
+            trigger_word=trigger_word,
+            class_prompt=class_prompt,
+        ),
+        require_existing=False,
+    )
+
+
+def update_shared_character_identity(
+    *,
+    datasets_root: Path,
+    identity_id: str,
+    display_name: str,
+    trigger_word: str,
+    class_prompt: str,
+) -> dict:
+    list_available_character_identities(datasets_root)
+    return _save_identity_catalog_entry(
+        catalog_path=_shared_identity_catalog_path(datasets_root),
+        lock_path=_shared_identity_lock_path(datasets_root),
+        identity=_validated_identity(
+            identity_id=identity_id,
+            display_name=display_name,
+            trigger_word=trigger_word,
+            class_prompt=class_prompt,
+        ),
+        require_existing=True,
+    )
 
 
 def save_character_identity(
@@ -320,7 +492,7 @@ def delete_character_identity(*, dataset_dir: Path, identity_id: str) -> dict:
     staged_identity_root = None
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(str(lock_path), timeout=30):
-        identities = list_character_identities(dataset_dir)
+        identities = _list_local_character_identities(dataset_dir)
         deleted_identity = next(
             (identity for identity in identities if identity["id"] == identity_id),
             None,
@@ -365,14 +537,76 @@ def delete_character_identity(*, dataset_dir: Path, identity_id: str) -> dict:
     }
 
 
-def _require_character_identity(dataset_dir: Path, identity_id: Optional[str]) -> Optional[dict]:
+def delete_shared_character_identity(*, datasets_root: Path, identity_id: str) -> dict:
+    """Delete one shared definition and its annotations from every direct child dataset."""
+    identity_id = _validate_identity_id(identity_id)
+    list_available_character_identities(datasets_root)
+    root = _resolved_datasets_root(datasets_root)
+    catalog_path = _shared_identity_catalog_path(root)
+    lock_path = _shared_identity_lock_path(root)
+    cleanup_pending = False
+    cleanup_errors = []
+    with FileLock(str(lock_path), timeout=30):
+        identities = _list_character_identities_at_path(catalog_path)
+        deleted_identity = next(
+            (identity for identity in identities if identity["id"] == identity_id),
+            None,
+        )
+        if deleted_identity is None:
+            raise ValueError(f"unknown character identity: {identity_id}")
+        remaining_identities = [
+            identity for identity in identities if identity["id"] != identity_id
+        ]
+        _write_character_identity_catalog(catalog_path, remaining_identities)
+        for entry in root.iterdir():
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            try:
+                entry.resolve(strict=True).relative_to(root)
+                local_ids = {
+                    identity["id"] for identity in _list_local_character_identities(entry)
+                }
+                if identity_id not in local_ids:
+                    continue
+                result = delete_character_identity(
+                    dataset_dir=entry,
+                    identity_id=identity_id,
+                )
+                cleanup_pending = cleanup_pending or result["cleanup_pending"]
+            except Exception as exc:
+                cleanup_pending = True
+                cleanup_errors.append(f"{entry.name}: {exc}")
+    return {
+        "deleted_identity": dict(deleted_identity),
+        "identities": [dict(identity) for identity in remaining_identities],
+        "cleanup_pending": cleanup_pending,
+        "cleanup_errors": cleanup_errors,
+    }
+
+
+def _require_character_identity(
+    dataset_dir: Path,
+    identity_id: Optional[str],
+    datasets_root: Optional[Path] = None,
+    *,
+    shared_catalog_locked: bool = False,
+) -> Optional[dict]:
     if identity_id is None:
         return None
     identity_id = _validate_identity_id(identity_id)
+    if datasets_root is None:
+        identities = list_character_identities(dataset_dir)
+    elif shared_catalog_locked:
+        identities = _list_character_identities_at_path(
+            _shared_identity_catalog_path(datasets_root)
+        )
+    else:
+        _resolved_datasets_root(datasets_root, dataset_dir)
+        identities = list_available_character_identities(datasets_root)
     identity = next(
         (
             candidate
-            for candidate in list_character_identities(dataset_dir)
+            for candidate in identities
             if candidate["id"] == identity_id
         ),
         None,
@@ -382,13 +616,49 @@ def _require_character_identity(dataset_dir: Path, identity_id: Optional[str]) -
     return identity
 
 
-def _character_identity_annotation_lock(dataset_dir: Path, identity_id: Optional[str]):
+def _activate_character_identity_unlocked(dataset_dir: Path, identity: Optional[dict]) -> None:
+    if identity is None:
+        return
+    identities = _list_local_character_identities(dataset_dir)
+    matching_index = next(
+        (index for index, existing in enumerate(identities) if existing["id"] == identity["id"]),
+        None,
+    )
+    conflict = _identity_conflict(identities, identity)
+    if conflict:
+        raise ValueError(conflict)
+    if matching_index is None:
+        if len(identities) >= MAX_CHARACTER_IDENTITIES:
+            raise ValueError(
+                f"character identity catalog supports at most {MAX_CHARACTER_IDENTITIES} identities"
+            )
+        identities.append(dict(identity))
+    else:
+        identities[matching_index] = dict(identity)
+    _write_character_identity_catalog(_identity_catalog_path(dataset_dir), identities)
+
+
+@contextmanager
+def _character_identity_annotation_lock(
+    dataset_dir: Path,
+    identity_id: Optional[str],
+    datasets_root: Optional[Path] = None,
+):
     """Serialize named-identity writes with catalog updates and deletion."""
     if identity_id is None:
-        return nullcontext()
+        with nullcontext():
+            yield
+        return
+    if datasets_root is not None:
+        _resolved_datasets_root(datasets_root, dataset_dir)
+        list_available_character_identities(datasets_root)
     lock_path = _identity_catalog_lock_path(dataset_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    return FileLock(str(lock_path), timeout=30)
+    with ExitStack() as stack:
+        if datasets_root is not None:
+            stack.enter_context(FileLock(str(_shared_identity_lock_path(datasets_root)), timeout=30))
+        stack.enter_context(FileLock(str(lock_path), timeout=30))
+        yield
 
 
 @dataclass(frozen=True)
@@ -673,10 +943,17 @@ def save_character_audio_intervals(
     media_path: Path,
     intervals: Sequence[Sequence[float]],
     identity_id: Optional[str] = None,
+    datasets_root: Optional[Path] = None,
 ) -> Path:
     validated = validate_character_audio_intervals(list(intervals))
-    with _character_identity_annotation_lock(dataset_dir, identity_id):
-        _require_character_identity(dataset_dir, identity_id)
+    with _character_identity_annotation_lock(dataset_dir, identity_id, datasets_root):
+        identity = _require_character_identity(
+            dataset_dir,
+            identity_id,
+            datasets_root,
+            shared_catalog_locked=datasets_root is not None,
+        )
+        _activate_character_identity_unlocked(dataset_dir, identity)
         paths = get_character_annotation_paths(
             dataset_dir=dataset_dir,
             media_path=media_path,
@@ -707,6 +984,7 @@ def save_character_visual_mask(
     media_path: Path,
     mask: np.ndarray,
     identity_id: Optional[str] = None,
+    datasets_root: Optional[Path] = None,
 ) -> Path:
     mask = np.asarray(mask)
     if mask.ndim == 2:
@@ -714,8 +992,14 @@ def save_character_visual_mask(
     if mask.ndim != 3 or min(mask.shape) < 1:
         raise ValueError("character visual mask must have shape HW or THW")
     binary_mask = (mask > 0).astype(np.uint8)
-    with _character_identity_annotation_lock(dataset_dir, identity_id):
-        _require_character_identity(dataset_dir, identity_id)
+    with _character_identity_annotation_lock(dataset_dir, identity_id, datasets_root):
+        identity = _require_character_identity(
+            dataset_dir,
+            identity_id,
+            datasets_root,
+            shared_catalog_locked=datasets_root is not None,
+        )
+        _activate_character_identity_unlocked(dataset_dir, identity)
         paths = get_character_annotation_paths(
             dataset_dir=dataset_dir,
             media_path=media_path,
@@ -756,6 +1040,7 @@ def track_character_visual_mask(
     dataset_dir: Path,
     media_path: Path,
     identity_id: Optional[str] = None,
+    datasets_root: Optional[Path] = None,
     prompts: Any,
     tracker: Callable[
         [Path, list[dict], Optional[np.ndarray], Optional[float], Callable[[str], None]],
@@ -765,7 +1050,7 @@ def track_character_visual_mask(
     initial_time_seconds: Optional[float] = None,
     progress: Callable[[str], None] = lambda _message: None,
 ) -> dict:
-    _require_character_identity(dataset_dir, identity_id)
+    _require_character_identity(dataset_dir, identity_id, datasets_root)
     paths = get_character_annotation_paths(
         dataset_dir=dataset_dir,
         media_path=media_path,
@@ -801,8 +1086,14 @@ def track_character_visual_mask(
     if mask.ndim != 3 or min(mask.shape) < 1:
         raise ValueError("character visual mask must have shape HW or THW")
     binary_mask = (mask > 0).astype(np.uint8)
-    with _character_identity_annotation_lock(dataset_dir, identity_id):
-        _require_character_identity(dataset_dir, identity_id)
+    with _character_identity_annotation_lock(dataset_dir, identity_id, datasets_root):
+        identity = _require_character_identity(
+            dataset_dir,
+            identity_id,
+            datasets_root,
+            shared_catalog_locked=datasets_root is not None,
+        )
+        _activate_character_identity_unlocked(dataset_dir, identity)
         paths = get_character_annotation_paths(
             dataset_dir=dataset_dir,
             media_path=media_path,
@@ -815,6 +1106,7 @@ def track_character_visual_mask(
         dataset_dir=dataset_dir,
         media_path=media_path,
         identity_id=identity_id,
+        datasets_root=datasets_root,
     )
 
 
@@ -824,8 +1116,9 @@ def get_character_mask_preview(
     media_path: Path,
     frame_index: int,
     identity_id: Optional[str] = None,
+    datasets_root: Optional[Path] = None,
 ) -> dict:
-    _require_character_identity(dataset_dir, identity_id)
+    _require_character_identity(dataset_dir, identity_id, datasets_root)
     paths = get_character_annotation_paths(
         dataset_dir=dataset_dir,
         media_path=media_path,
@@ -859,8 +1152,9 @@ def get_character_annotation_state(
     dataset_dir: Path,
     media_path: Path,
     identity_id: Optional[str] = None,
+    datasets_root: Optional[Path] = None,
 ) -> dict:
-    identity = _require_character_identity(dataset_dir, identity_id)
+    identity = _require_character_identity(dataset_dir, identity_id, datasets_root)
     paths = get_character_annotation_paths(
         dataset_dir=dataset_dir,
         media_path=media_path,
@@ -885,7 +1179,11 @@ def get_character_annotation_state(
     return {
         "root": str(paths.root),
         "identity": identity,
-        "identities": list_character_identities(dataset_dir),
+        "identities": (
+            list_available_character_identities(datasets_root)
+            if datasets_root is not None
+            else list_character_identities(dataset_dir)
+        ),
         "visual": {
             "exists": paths.visual.exists(),
             "path": str(paths.visual),

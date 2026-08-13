@@ -93,6 +93,51 @@ console.log(JSON.stringify(await collectDatasetInventories({json.dumps(str(datas
             self.assertEqual(inventory["audio"], {"sources": 1, "assignedSources": 0, "characterViews": 0})
             self.assertEqual(inventory["identityCount"], 2)
 
+    def test_inventory_ignores_local_identity_removed_from_shared_registry(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            datasets_root = Path(tmp_dir) / "datasets"
+            dataset_dir = datasets_root / "characters"
+            dataset_dir.mkdir(parents=True)
+            (dataset_dir / "one.jpg").touch()
+            identity = {
+                "id": "alice",
+                "display_name": "Alice",
+                "trigger_word": "AliceToken",
+                "class_prompt": "a woman",
+            }
+            (datasets_root / "_character_dop_identities.json").write_text(
+                json.dumps({"version": 1, "identities": []}),
+                encoding="utf-8",
+            )
+            annotation_root = dataset_dir / "_character_dop"
+            annotation_root.mkdir()
+            (annotation_root / "identities.json").write_text(
+                json.dumps({"version": 1, "identities": [identity]}),
+                encoding="utf-8",
+            )
+            visual_dir = annotation_root / "identities" / "alice" / "visual"
+            visual_dir.mkdir(parents=True)
+            (visual_dir / "one.png").touch()
+            module_path = (
+                Path(__file__).parents[1] / "ui" / "src" / "server" / "datasetStats.ts"
+            ).resolve()
+            script = f"""
+import {{ pathToFileURL }} from 'node:url';
+const {{ collectDatasetInventories }} = await import(pathToFileURL({json.dumps(str(module_path))}).href);
+console.log(JSON.stringify(await collectDatasetInventories({json.dumps(str(datasets_root))}, [{json.dumps(str(dataset_dir))}])));
+"""
+            completed = subprocess.run(
+                ["node", "--experimental-strip-types", "--input-type=module", "-e", script],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            inventory = json.loads(completed.stdout)[str(dataset_dir)]
+
+            self.assertEqual(inventory["identityCount"], 0)
+            self.assertEqual(inventory["images"]["assignedSources"], 0)
+            self.assertEqual(inventory["images"]["characterViews"], 0)
+
     def test_inventory_reports_invalid_catalog_metadata(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_dir = Path(tmp_dir) / "datasets" / "invalid-catalog"

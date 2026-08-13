@@ -15,7 +15,9 @@ from PIL import Image
 
 from toolkit.character_dop_annotation import (
     MAX_CHARACTER_IDENTITIES,
+    create_shared_character_identity,
     delete_character_identity,
+    delete_shared_character_identity,
     detect_character_instances,
     find_matching_character_visual_mask,
     get_character_mask_preview,
@@ -24,11 +26,13 @@ from toolkit.character_dop_annotation import (
     is_character_annotation_artifact,
     get_character_annotation_state,
     list_character_identities,
+    list_available_character_identities,
     save_character_audio_intervals,
     save_character_identity,
     save_character_visual_mask,
     track_character_visual_mask,
     update_character_identity,
+    update_shared_character_identity,
 )
 
 
@@ -929,6 +933,234 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
 
             self.assertEqual(updated_state["identity"]["display_name"], "Alice Example")
             self.assertEqual(updated_state["identity"]["trigger_word"], "AliceUpdatedToken")
+
+    def test_ui_script_shares_identity_definitions_across_datasets(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            datasets_root = Path(tmp_dir) / "datasets"
+            first_dataset = datasets_root / "first"
+            second_dataset = datasets_root / "second"
+            first_dataset.mkdir(parents=True)
+            second_dataset.mkdir()
+            first_media = first_dataset / "portrait.jpg"
+            second_media = second_dataset / "portrait.jpg"
+            Image.new("RGB", (4, 4)).save(first_media)
+            Image.new("RGB", (4, 4)).save(second_media)
+            script_path = Path(__file__).parents[1] / "ui_scripts" / "character_dop_annotator.py"
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "save-identity",
+                    "--datasets-root",
+                    str(datasets_root),
+                    "--dataset-dir",
+                    str(first_dataset),
+                    "--media-path",
+                    str(first_media),
+                    "--payload-stdin",
+                ],
+                input=json.dumps(
+                    {
+                        "identity_id": "alice",
+                        "display_name": "Alice",
+                        "trigger_word": "AliceToken",
+                        "class_prompt": "a woman",
+                    }
+                ),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            loaded = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "state",
+                    "--datasets-root",
+                    str(datasets_root),
+                    "--dataset-dir",
+                    str(second_dataset),
+                    "--media-path",
+                    str(second_media),
+                    "--identity-id",
+                    "alice",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            state = json.loads(loaded.stdout.strip().splitlines()[-1])
+
+            self.assertEqual(state["identity"]["id"], "alice")
+            self.assertEqual(
+                [identity["id"] for identity in state["identities"]],
+                ["alice"],
+            )
+
+    def test_shared_identity_activates_per_dataset_on_first_annotation(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            datasets_root = Path(tmp_dir) / "datasets"
+            first_dataset = datasets_root / "first"
+            second_dataset = datasets_root / "second"
+            first_dataset.mkdir(parents=True)
+            second_dataset.mkdir()
+            second_media = second_dataset / "portrait.jpg"
+            Image.new("RGB", (4, 4)).save(second_media)
+            create_shared_character_identity(
+                datasets_root=datasets_root,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a woman",
+            )
+
+            self.assertEqual(list_character_identities(second_dataset), [])
+            state = get_character_annotation_state(
+                datasets_root=datasets_root,
+                dataset_dir=second_dataset,
+                media_path=second_media,
+                identity_id="alice",
+            )
+            self.assertEqual(state["identity"]["id"], "alice")
+            self.assertFalse(state["visual"]["exists"])
+
+            save_character_visual_mask(
+                datasets_root=datasets_root,
+                dataset_dir=second_dataset,
+                media_path=second_media,
+                identity_id="alice",
+                mask=np.ones((4, 4), dtype=np.uint8),
+            )
+
+            self.assertEqual(
+                [identity["id"] for identity in list_character_identities(second_dataset)],
+                ["alice"],
+            )
+            self.assertEqual(
+                get_character_identity_views(
+                    dataset_dir=second_dataset,
+                    media_path=second_media,
+                )[0].trigger_word,
+                "AliceToken",
+            )
+            self.assertEqual(list_character_identities(first_dataset), [])
+
+    def test_existing_dataset_identity_is_migrated_to_shared_registry(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            datasets_root = Path(tmp_dir) / "datasets"
+            first_dataset = datasets_root / "first"
+            second_dataset = datasets_root / "second"
+            first_dataset.mkdir(parents=True)
+            second_dataset.mkdir()
+            second_media = second_dataset / "portrait.jpg"
+            Image.new("RGB", (4, 4)).save(second_media)
+            save_character_identity(
+                dataset_dir=first_dataset,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a woman",
+            )
+
+            state = get_character_annotation_state(
+                datasets_root=datasets_root,
+                dataset_dir=second_dataset,
+                media_path=second_media,
+                identity_id="alice",
+            )
+
+            self.assertEqual(state["identity"]["id"], "alice")
+            self.assertEqual(
+                json.loads(
+                    (datasets_root / "_character_dop_identities.json").read_text(
+                        encoding="utf-8"
+                    )
+                )["identities"][0]["trigger_word"],
+                "AliceToken",
+            )
+
+    def test_shared_identity_update_is_used_by_every_activated_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            datasets_root = Path(tmp_dir) / "datasets"
+            dataset_dir = datasets_root / "portraits"
+            dataset_dir.mkdir(parents=True)
+            media_path = dataset_dir / "portrait.jpg"
+            Image.new("RGB", (4, 4)).save(media_path)
+            create_shared_character_identity(
+                datasets_root=datasets_root,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a woman",
+            )
+            save_character_visual_mask(
+                datasets_root=datasets_root,
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="alice",
+                mask=np.ones((4, 4), dtype=np.uint8),
+            )
+
+            update_shared_character_identity(
+                datasets_root=datasets_root,
+                identity_id="alice",
+                display_name="Alice Example",
+                trigger_word="AliceUpdatedToken",
+                class_prompt="a person",
+            )
+
+            identity = list_character_identities(dataset_dir)[0]
+            self.assertEqual(identity["display_name"], "Alice Example")
+            self.assertEqual(identity["trigger_word"], "AliceUpdatedToken")
+            self.assertEqual(
+                get_character_identity_views(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                )[0].class_prompt,
+                "a person",
+            )
+
+    def test_shared_identity_delete_removes_annotations_from_every_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            datasets_root = Path(tmp_dir) / "datasets"
+            datasets = [datasets_root / "first", datasets_root / "second"]
+            media_paths = []
+            for dataset_dir in datasets:
+                dataset_dir.mkdir(parents=True, exist_ok=True)
+                media_path = dataset_dir / "portrait.jpg"
+                Image.new("RGB", (4, 4)).save(media_path)
+                media_paths.append(media_path)
+            create_shared_character_identity(
+                datasets_root=datasets_root,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a woman",
+            )
+            for dataset_dir, media_path in zip(datasets, media_paths):
+                save_character_visual_mask(
+                    datasets_root=datasets_root,
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id="alice",
+                    mask=np.ones((4, 4), dtype=np.uint8),
+                )
+
+            result = delete_shared_character_identity(
+                datasets_root=datasets_root,
+                identity_id="alice",
+            )
+
+            self.assertEqual(result["deleted_identity"]["id"], "alice")
+            self.assertFalse(result["cleanup_pending"])
+            self.assertEqual(list_available_character_identities(datasets_root), [])
+            for dataset_dir in datasets:
+                self.assertEqual(list_character_identities(dataset_dir), [])
+                self.assertFalse(
+                    (dataset_dir / "_character_dop" / "identities" / "alice").exists()
+                )
 
     def test_ui_script_deletes_a_named_identity_and_selects_a_safe_fallback(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

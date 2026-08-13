@@ -40,7 +40,7 @@ async function resolveDatasetMedia(datasetName: unknown, rawMediaPath: unknown) 
       fs.promises.stat(mediaPath),
     ]);
     if (!datasetStat.isDirectory() || !mediaStat.isFile()) return null;
-    return { datasetDir, mediaPath };
+    return { datasetsRoot, datasetDir, mediaPath };
   } catch {
     return null;
   }
@@ -182,6 +182,8 @@ export async function POST(request: Request) {
     body.action,
     '--dataset-dir',
     resolved.datasetDir,
+    '--datasets-root',
+    resolved.datasetsRoot,
     '--media-path',
     resolved.mediaPath,
   ];

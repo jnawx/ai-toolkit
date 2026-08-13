@@ -83,6 +83,20 @@ class CharacterDOPUIContractTests(unittest.TestCase):
         self.assertIn('aria-label="Character identity"', source)
         self.assertIn('placeholder="Trigger word"', source)
         self.assertIn('placeholder="Generic class prompt"', source)
+        self.assertIn("shared across all datasets", source)
+
+        route_source = (
+            Path(__file__).parents[1]
+            / "ui"
+            / "src"
+            / "app"
+            / "api"
+            / "datasets"
+            / "characterDop"
+            / "route.ts"
+        ).read_text(encoding="utf-8")
+        self.assertIn("'--datasets-root'", route_source)
+        self.assertIn("resolved.datasetsRoot", route_source)
 
     def test_character_annotator_can_edit_and_delete_the_selected_identity(self):
         source = (
@@ -97,9 +111,9 @@ class CharacterDOPUIContractTests(unittest.TestCase):
         self.assertIn("request('save-identity'", source)
         self.assertIn("Delete identity", source)
         self.assertIn("request('delete-identity'", source)
-        self.assertIn("permanently deletes its masks", source)
+        self.assertIn("permanently deletes the shared identity", source)
         self.assertIn("nextState.cleanup_pending", source)
-        self.assertIn("some staged files could not be removed", source)
+        self.assertIn("some files could not be removed", source)
 
     def test_character_annotator_persists_legacy_selection_and_ignores_stale_previews(self):
         source = (

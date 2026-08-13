@@ -31,6 +31,7 @@ const MAX_CATALOG_BYTES = 128 * 1024;
 const MAX_IDENTITIES = 64;
 const MAX_SELECTED_DATASETS = 32;
 const MAX_SCAN_ENTRIES_PER_DATASET = 250_000;
+const SHARED_IDENTITY_CATALOG = '_character_dop_identities.json';
 const IDENTITY_TEXT_LIMITS: Record<string, [number, number]> = {
   display_name: [128, 512],
   trigger_word: [128, 512],
@@ -114,11 +115,14 @@ async function walkFiles(
   return files;
 }
 
-async function readIdentityIds(datasetPath: string): Promise<{ ids: string[]; error?: string }> {
+async function readIdentityIds(
+  containmentRoot: string,
+  rawCatalogPath: string,
+): Promise<{ ids: string[]; exists: boolean; error?: string }> {
   try {
     const catalogPath = await containedStoragePath(
-      datasetPath,
-      path.join(datasetPath, '_character_dop', 'identities.json'),
+      containmentRoot,
+      rawCatalogPath,
     );
     const stat = await fs.stat(catalogPath);
     if (stat.size > MAX_CATALOG_BYTES) throw new Error('Character identity catalog is too large');
@@ -154,10 +158,10 @@ async function readIdentityIds(datasetPath: string): Promise<{ ids: string[]; er
       triggers.push(trigger);
     }
     if (new Set(ids).size !== ids.length) throw new Error('Character identity catalog contains duplicate ids');
-    return { ids };
+    return { ids, exists: true };
   } catch (error: any) {
-    if (error?.code === 'ENOENT') return { ids: [] };
-    return { ids: [], error: error?.message || 'Character identity catalog could not be read' };
+    if (error?.code === 'ENOENT') return { ids: [], exists: false };
+    return { ids: [], exists: true, error: error?.message || 'Character identity catalog could not be read' };
   }
 }
 
@@ -227,22 +231,32 @@ async function annotatedStemsForIdentity(
   return assignments;
 }
 
-export async function collectDatasetInventory(datasetPath: string): Promise<DatasetInventory> {
+export async function collectDatasetInventory(
+  datasetPath: string,
+  sharedIdentityIds?: Set<string>,
+  sharedCatalogError?: string,
+): Promise<DatasetInventory> {
   const resolvedDatasetPath = await fs.realpath(path.resolve(datasetPath));
   const budget = { remaining: MAX_SCAN_ENTRIES_PER_DATASET };
   const sourceFiles = await walkFiles(resolvedDatasetPath, true, MEDIA_EXTENSIONS, budget);
-  const catalog = await readIdentityIds(resolvedDatasetPath);
+  const catalog = await readIdentityIds(
+    resolvedDatasetPath,
+    path.join(resolvedDatasetPath, '_character_dop', 'identities.json'),
+  );
+  const activeIdentityIds = sharedIdentityIds
+    ? catalog.ids.filter(identityId => sharedIdentityIds.has(identityId))
+    : catalog.ids;
   const identityAssignments: IdentityAssignments[] = [];
-  for (const identityId of catalog.ids) {
+  for (const identityId of activeIdentityIds) {
     identityAssignments.push(await annotatedStemsForIdentity(resolvedDatasetPath, identityId, budget));
   }
   const inventory: DatasetInventory = {
     path: resolvedDatasetPath,
-    identityCount: catalog.ids.length,
+    identityCount: activeIdentityIds.length,
     images: emptyMediaInventory(),
     videos: emptyMediaInventory(),
     audio: emptyMediaInventory(),
-    error: catalog.error ?? identityAssignments.find(assignment => assignment.error)?.error,
+    error: sharedCatalogError ?? catalog.error ?? identityAssignments.find(assignment => assignment.error)?.error,
   };
 
   for (const sourcePath of sourceFiles) {
@@ -300,11 +314,22 @@ export async function collectDatasetInventories(
       datasetSelections.push({ requestedPath: lexicalPath, realPath });
     }
   }
+  const sharedCatalog = await readIdentityIds(
+    resolvedRoot,
+    path.join(resolvedRoot, SHARED_IDENTITY_CATALOG),
+  );
+  const sharedIdentityIds = sharedCatalog.exists && !sharedCatalog.error
+    ? new Set(sharedCatalog.ids)
+    : undefined;
   const inventories: DatasetInventory[] = [];
   for (const selection of datasetSelections) {
     try {
       inventories.push({
-        ...await collectDatasetInventory(selection.realPath),
+        ...await collectDatasetInventory(
+          selection.realPath,
+          sharedIdentityIds,
+          sharedCatalog.error,
+        ),
         path: selection.requestedPath,
       });
     } catch (error) {

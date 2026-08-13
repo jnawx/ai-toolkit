@@ -9,13 +9,16 @@ if str(TOOLKIT_ROOT) not in sys.path:
 
 from toolkit.character_dop_annotation import (
     create_character_identity,
+    create_shared_character_identity,
     delete_character_identity,
+    delete_shared_character_identity,
     detect_character_instances,
     get_character_annotation_state,
     get_character_mask_preview,
     save_character_audio_intervals,
     track_character_visual_mask,
     update_character_identity,
+    update_shared_character_identity,
 )
 from toolkit.character_mask_models import (
     DEFAULT_SAM2_TRACKER_MODEL,
@@ -40,6 +43,7 @@ def main() -> None:
         choices=("models", "state", "save-identity", "update-identity", "delete-identity", "save-audio", "detect", "track", "preview"),
     )
     parser.add_argument("--dataset-dir")
+    parser.add_argument("--datasets-root")
     parser.add_argument("--media-path")
     parser.add_argument("--intervals", type=_json_arg)
     parser.add_argument("--prompts", type=_json_arg)
@@ -54,6 +58,7 @@ def main() -> None:
     if args.dataset_dir is None or args.media_path is None:
         parser.error(f"{args.action} requires --dataset-dir and --media-path")
     dataset_dir = Path(args.dataset_dir)
+    datasets_root = Path(args.datasets_root) if args.datasets_root else None
     media_path = Path(args.media_path)
     payload = json.load(sys.stdin) if args.payload_stdin else {}
 
@@ -63,10 +68,20 @@ def main() -> None:
             dataset_dir=dataset_dir,
             media_path=media_path,
             identity_id=identity_id,
+            datasets_root=datasets_root,
         )
     elif args.action == "save-identity":
-        identity = create_character_identity(
-            dataset_dir=dataset_dir,
+        create_identity = (
+            create_shared_character_identity
+            if datasets_root is not None
+            else create_character_identity
+        )
+        identity = create_identity(
+            **(
+                {"datasets_root": datasets_root}
+                if datasets_root is not None
+                else {"dataset_dir": dataset_dir}
+            ),
             identity_id=payload.get("identity_id", ""),
             display_name=payload.get("display_name", ""),
             trigger_word=payload.get("trigger_word", ""),
@@ -76,10 +91,20 @@ def main() -> None:
             dataset_dir=dataset_dir,
             media_path=media_path,
             identity_id=identity["id"],
+            datasets_root=datasets_root,
         )
     elif args.action == "update-identity":
-        identity = update_character_identity(
-            dataset_dir=dataset_dir,
+        update_identity = (
+            update_shared_character_identity
+            if datasets_root is not None
+            else update_character_identity
+        )
+        identity = update_identity(
+            **(
+                {"datasets_root": datasets_root}
+                if datasets_root is not None
+                else {"dataset_dir": dataset_dir}
+            ),
             identity_id=payload.get("identity_id", ""),
             display_name=payload.get("display_name", ""),
             trigger_word=payload.get("trigger_word", ""),
@@ -89,11 +114,19 @@ def main() -> None:
             dataset_dir=dataset_dir,
             media_path=media_path,
             identity_id=identity["id"],
+            datasets_root=datasets_root,
         )
     elif args.action == "delete-identity":
-        deleted = delete_character_identity(
-            dataset_dir=dataset_dir,
-            identity_id=identity_id,
+        deleted = (
+            delete_shared_character_identity(
+                datasets_root=datasets_root,
+                identity_id=identity_id,
+            )
+            if datasets_root is not None
+            else delete_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id=identity_id,
+            )
         )
         fallback_identity_id = (
             deleted["identities"][0]["id"] if deleted["identities"] else None
@@ -102,9 +135,11 @@ def main() -> None:
             dataset_dir=dataset_dir,
             media_path=media_path,
             identity_id=fallback_identity_id,
+            datasets_root=datasets_root,
         )
         result["deleted_identity"] = deleted["deleted_identity"]
         result["cleanup_pending"] = deleted["cleanup_pending"]
+        result["cleanup_errors"] = deleted.get("cleanup_errors", [])
     elif args.action == "save-audio":
         intervals = payload.get("intervals", args.intervals)
         if intervals is None:
@@ -114,11 +149,13 @@ def main() -> None:
             media_path=media_path,
             intervals=intervals,
             identity_id=identity_id,
+            datasets_root=datasets_root,
         )
         result = get_character_annotation_state(
             dataset_dir=dataset_dir,
             media_path=media_path,
             identity_id=identity_id,
+            datasets_root=datasets_root,
         )
     elif args.action == "preview":
         result = get_character_mask_preview(
@@ -126,6 +163,7 @@ def main() -> None:
             media_path=media_path,
             frame_index=args.frame_index,
             identity_id=identity_id,
+            datasets_root=datasets_root,
         )
     elif args.action == "detect":
         result = detect_character_instances(
@@ -150,6 +188,7 @@ def main() -> None:
             dataset_dir=dataset_dir,
             media_path=media_path,
             identity_id=identity_id,
+            datasets_root=datasets_root,
             prompts=prompts or [],
             initial_mask_data_urls=initial_masks,
             initial_time_seconds=payload.get("initial_time_seconds"),

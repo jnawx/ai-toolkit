@@ -12,6 +12,7 @@ from toolkit.character_dop_annotation import (
     get_character_annotation_state,
     get_character_mask_preview,
     save_character_audio_intervals,
+    save_character_identity,
     track_character_visual_mask,
 )
 from toolkit.character_mask_models import (
@@ -32,13 +33,17 @@ def _json_arg(value: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare built-in Character DOP annotations")
-    parser.add_argument("action", choices=("models", "state", "save-audio", "detect", "track", "preview"))
+    parser.add_argument(
+        "action",
+        choices=("models", "state", "save-identity", "save-audio", "detect", "track", "preview"),
+    )
     parser.add_argument("--dataset-dir")
     parser.add_argument("--media-path")
     parser.add_argument("--intervals", type=_json_arg)
     parser.add_argument("--prompts", type=_json_arg)
     parser.add_argument("--frame-index", type=int, default=0)
     parser.add_argument("--model-id")
+    parser.add_argument("--identity-id")
     parser.add_argument("--payload-stdin", action="store_true")
     args = parser.parse_args()
     if args.action == "models":
@@ -50,8 +55,26 @@ def main() -> None:
     media_path = Path(args.media_path)
     payload = json.load(sys.stdin) if args.payload_stdin else {}
 
+    identity_id = payload.get("identity_id", args.identity_id)
     if args.action == "state":
-        result = get_character_annotation_state(dataset_dir=dataset_dir, media_path=media_path)
+        result = get_character_annotation_state(
+            dataset_dir=dataset_dir,
+            media_path=media_path,
+            identity_id=identity_id,
+        )
+    elif args.action == "save-identity":
+        identity = save_character_identity(
+            dataset_dir=dataset_dir,
+            identity_id=payload.get("identity_id", ""),
+            display_name=payload.get("display_name", ""),
+            trigger_word=payload.get("trigger_word", ""),
+            class_prompt=payload.get("class_prompt", ""),
+        )
+        result = get_character_annotation_state(
+            dataset_dir=dataset_dir,
+            media_path=media_path,
+            identity_id=identity["id"],
+        )
     elif args.action == "save-audio":
         intervals = payload.get("intervals", args.intervals)
         if intervals is None:
@@ -60,13 +83,19 @@ def main() -> None:
             dataset_dir=dataset_dir,
             media_path=media_path,
             intervals=intervals,
+            identity_id=identity_id,
         )
-        result = get_character_annotation_state(dataset_dir=dataset_dir, media_path=media_path)
+        result = get_character_annotation_state(
+            dataset_dir=dataset_dir,
+            media_path=media_path,
+            identity_id=identity_id,
+        )
     elif args.action == "preview":
         result = get_character_mask_preview(
             dataset_dir=dataset_dir,
             media_path=media_path,
             frame_index=args.frame_index,
+            identity_id=identity_id,
         )
     elif args.action == "detect":
         result = detect_character_instances(
@@ -90,6 +119,7 @@ def main() -> None:
         result = track_character_visual_mask(
             dataset_dir=dataset_dir,
             media_path=media_path,
+            identity_id=identity_id,
             prompts=prompts or [],
             initial_mask_data_urls=initial_masks,
             initial_time_seconds=payload.get("initial_time_seconds"),

@@ -13,7 +13,7 @@ export const maxDuration = 1200;
 
 const SCRIPT_PATH = path.join(TOOLKIT_ROOT, 'ui_scripts', 'character_dop_annotator.py');
 const TIMEOUT_MS = 20 * 60 * 1000;
-const ACTIONS = new Set(['models', 'state', 'save-audio', 'detect', 'track', 'preview']);
+const ACTIONS = new Set(['models', 'state', 'save-identity', 'save-audio', 'detect', 'track', 'preview']);
 const MAX_ANNOTATOR_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_ANNOTATOR_ERROR_BYTES = 1024 * 1024;
 const MAX_ANNOTATOR_INPUT_BYTES = 32 * 1024 * 1024;
@@ -185,10 +185,21 @@ export async function POST(request: Request) {
     '--media-path',
     resolved.mediaPath,
   ];
+  if (typeof body.identityId === 'string' && body.identityId) {
+    args.push('--identity-id', body.identityId);
+  }
   let payload: Record<string, unknown> | undefined;
-  if (body.action === 'save-audio') {
+  if (body.action === 'save-identity') {
     args.push('--payload-stdin');
-    payload = { intervals: body.intervals ?? [] };
+    payload = {
+      identity_id: body.identityId,
+      display_name: body.displayName,
+      trigger_word: body.triggerWord,
+      class_prompt: body.classPrompt,
+    };
+  } else if (body.action === 'save-audio') {
+    args.push('--payload-stdin');
+    payload = { identity_id: body.identityId, intervals: body.intervals ?? [] };
   } else if (body.action === 'detect') {
     args.push('--payload-stdin');
     payload = {
@@ -199,6 +210,7 @@ export async function POST(request: Request) {
   } else if (body.action === 'track') {
     args.push('--payload-stdin');
     payload = {
+      identity_id: body.identityId,
       prompts: body.prompts ?? [],
       initial_masks: body.initialMasks ?? [],
       initial_time_seconds: body.initialTimeSeconds,

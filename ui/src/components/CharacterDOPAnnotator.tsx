@@ -12,8 +12,17 @@ type CharacterPrompt = { time_seconds: number; points: CharacterPoint[] };
 type SpeakingInterval = [number, number];
 const MAX_WAVEFORM_SOURCE_BYTES = 32 * 1024 * 1024;
 
+type CharacterIdentity = {
+  id: string;
+  display_name: string;
+  trigger_word: string;
+  class_prompt: string;
+};
+
 type AnnotationState = {
   root: string;
+  identity: CharacterIdentity | null;
+  identities: CharacterIdentity[];
   visual: { exists: boolean; path: string; shape: number[] | null };
   audio: { exists: boolean; path: string; intervals: SpeakingInterval[] };
   prompts: CharacterPrompt[];
@@ -52,6 +61,8 @@ type DetectionResult = {
 const DEFAULT_TRACKER_MODEL = 'facebook/sam2.1-hiera-tiny';
 const DEFAULT_DETECTOR_MODEL = 'facebook/sam3';
 const CHARACTER_DOP_TRACKER_STORAGE_KEY = 'ai-toolkit.character-dop.sam2-tracker-model';
+const CHARACTER_DOP_LEGACY_IDENTITY = '__legacy__';
+const characterIdentityStorageKey = (datasetName: string) => `ai-toolkit.character-dop.identity.${datasetName}`;
 
 type Props = {
   open: boolean;
@@ -172,7 +183,12 @@ function SpeakingTimeline({
 export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, onClose }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const identitySelectionInitializedRef = useRef(false);
   const [state, setState] = useState<AnnotationState | null>(null);
+  const [activeIdentityId, setActiveIdentityId] = useState<string | null>(null);
+  const [newIdentityName, setNewIdentityName] = useState('');
+  const [newIdentityTrigger, setNewIdentityTrigger] = useState('');
+  const [newIdentityClass, setNewIdentityClass] = useState('a person');
   const [prompts, setPrompts] = useState<CharacterPrompt[]>([]);
   const [intervals, setIntervals] = useState<SpeakingInterval[]>([]);
   const [pointLabel, setPointLabel] = useState<0 | 1>(1);
@@ -190,7 +206,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
   const [peaks, setPeaks] = useState<number[]>([]);
   const [markStart, setMarkStart] = useState<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [busy, setBusy] = useState<'load' | 'detect' | 'track' | 'audio' | null>(null);
+  const [busy, setBusy] = useState<'load' | 'identity' | 'detect' | 'track' | 'audio' | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const videoItem = isVideo(mediaPath);
@@ -214,6 +230,15 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
 
   useEffect(() => {
     if (!open) return;
+    identitySelectionInitializedRef.current = false;
+    setActiveIdentityId(null);
+    setCurrentTime(0);
+    setDuration(0);
+    setPeaks([]);
+  }, [open, mediaPath]);
+
+  useEffect(() => {
+    if (!open) return;
     let cancelled = false;
     setBusy('load');
     setError(null);
@@ -221,15 +246,32 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     setPreview(null);
     setDetection(null);
     setSelectedCandidateIds([]);
-    setCurrentTime(0);
-    setDuration(0);
-    setPeaks([]);
-    Promise.all([request('state'), request('models')])
+    Promise.all([
+      request('state', { identityId: activeIdentityId }),
+      request('models'),
+    ])
       .then(([nextState, catalog]: [AnnotationState, MaskModelCatalog]) => {
         if (cancelled) return;
         setState(nextState);
         setPrompts(nextState.prompts ?? []);
         setIntervals(nextState.audio?.intervals ?? []);
+        if (!identitySelectionInitializedRef.current) {
+          identitySelectionInitializedRef.current = true;
+          if (activeIdentityId == null && nextState.identities.length) {
+            let preferredIdentityId: string | null = nextState.identities[0].id;
+            try {
+              const storedIdentityId = window.localStorage.getItem(characterIdentityStorageKey(datasetName));
+              if (storedIdentityId === CHARACTER_DOP_LEGACY_IDENTITY) {
+                preferredIdentityId = null;
+              } else if (storedIdentityId && nextState.identities.some(identity => identity.id === storedIdentityId)) {
+                preferredIdentityId = storedIdentityId;
+              }
+            } catch {
+              // Fall back to the first configured identity when storage is unavailable.
+            }
+            setActiveIdentityId(preferredIdentityId);
+          }
+        }
         setModelCatalog(catalog);
         let preferredTrackerModel = catalog.defaults.tracker;
         try {
@@ -249,7 +291,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     return () => {
       cancelled = true;
     };
-  }, [open, request]);
+  }, [activeIdentityId, datasetName, open, request]);
 
   useEffect(() => {
     if (!open || !hasTimeline) return;
@@ -303,13 +345,21 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       setPreview(null);
       return;
     }
+    let cancelled = false;
     const timer = setTimeout(() => {
-      request('preview', { frameIndex })
-        .then(data => setPreview(data.data_url))
-        .catch(() => setPreview(null));
+      request('preview', { identityId: activeIdentityId, frameIndex })
+        .then(data => {
+          if (!cancelled) setPreview(data.data_url);
+        })
+        .catch(() => {
+          if (!cancelled) setPreview(null);
+        });
     }, 120);
-    return () => clearTimeout(timer);
-  }, [open, state?.visual?.exists, showPreview, frameIndex, previewRevision, request]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [activeIdentityId, open, state?.visual?.exists, showPreview, frameIndex, previewRevision, request]);
 
   const activePromptIndex = useMemo(() => {
     if (!prompts.length) return -1;
@@ -413,6 +463,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     setMessage(`${selectedTracker?.label ?? 'SAM 2'} is tracking the selected character through the source media. Its first run downloads the model.`);
     try {
       const nextState: AnnotationState = await request('track', {
+        identityId: activeIdentityId,
         prompts,
         initialMasks: selectedCandidates.map(candidate => candidate.mask_data_url),
         initialTimeSeconds: selectedCandidates.length ? detection?.time_seconds : undefined,
@@ -437,12 +488,59 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     setError(null);
     try {
       const normalized = mergeIntervals(intervals);
-      const nextState: AnnotationState = await request('save-audio', { intervals: normalized });
+      const nextState: AnnotationState = await request('save-audio', {
+        identityId: activeIdentityId,
+        intervals: normalized,
+      });
       setState(nextState);
       setIntervals(nextState.audio.intervals);
       setMessage(`Saved ${nextState.audio.intervals.length} target-character speaking interval(s).`);
     } catch (reason: any) {
       setError(reason?.response?.data?.error || reason.message || 'Speaking intervals could not be saved');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const createIdentity = async () => {
+    const triggerWord = newIdentityTrigger.trim();
+    const identitySlug = triggerWord
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 48);
+    const identitySuffix = globalThis.crypto?.randomUUID
+      ? globalThis.crypto.randomUUID().slice(0, 8)
+      : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`.slice(0, 8);
+    const identityId = identitySlug ? `${identitySlug}-${identitySuffix}` : '';
+    if (!identityId || !newIdentityName.trim() || !newIdentityClass.trim()) {
+      setError('Display name, trigger word, and generic class prompt are required.');
+      return;
+    }
+    setBusy('identity');
+    setError(null);
+    try {
+      const nextState: AnnotationState = await request('save-identity', {
+        identityId,
+        displayName: newIdentityName.trim(),
+        triggerWord,
+        classPrompt: newIdentityClass.trim(),
+      });
+      setActiveIdentityId(identityId);
+      identitySelectionInitializedRef.current = true;
+      try {
+        window.localStorage.setItem(characterIdentityStorageKey(datasetName), identityId);
+      } catch {
+        // The identity remains selected for this session when storage is unavailable.
+      }
+      setState(nextState);
+      setPrompts(nextState.prompts ?? []);
+      setIntervals(nextState.audio?.intervals ?? []);
+      setNewIdentityName('');
+      setNewIdentityTrigger('');
+      setMessage(`${nextState.identity?.display_name ?? triggerWord} is ready to annotate on this media.`);
+    } catch (reason: any) {
+      setError(reason?.response?.data?.error || reason.message || 'Character identity could not be saved');
     } finally {
       setBusy(null);
     }
@@ -548,6 +646,83 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
             <aside className="space-y-5 overflow-y-auto border-l border-gray-800 p-4 text-sm">
               {error && <div className="rounded border border-red-700 bg-red-950/60 p-3 text-red-200">{error}</div>}
               {message && <div className="rounded border border-blue-800 bg-blue-950/40 p-3 text-blue-200">{message}</div>}
+
+              <section className="space-y-3 rounded-lg border border-gray-800 bg-gray-900/50 p-3">
+                <div>
+                  <h3 className="font-medium text-gray-100">Character identities</h3>
+                  <p className="mt-1 text-[11px] leading-relaxed text-gray-500">
+                    Select which identity this mask and speaking track belong to. One shared file becomes a separate protected training view for every annotated identity.
+                  </p>
+                </div>
+                <select
+                  aria-label="Character identity"
+                  value={activeIdentityId ?? ''}
+                  disabled={Boolean(busy)}
+                  onChange={event => {
+                    const identityId = event.target.value || null;
+                    identitySelectionInitializedRef.current = true;
+                    setActiveIdentityId(identityId);
+                    try {
+                      if (identityId) {
+                        window.localStorage.setItem(characterIdentityStorageKey(datasetName), identityId);
+                      } else {
+                        window.localStorage.setItem(
+                          characterIdentityStorageKey(datasetName),
+                          CHARACTER_DOP_LEGACY_IDENTITY,
+                        );
+                      }
+                    } catch {
+                      // The identity remains selected for this session when storage is unavailable.
+                    }
+                    setDetection(null);
+                    setSelectedCandidateIds([]);
+                    setPreview(null);
+                  }}
+                  className="w-full rounded border border-gray-700 bg-gray-950 px-2.5 py-2 text-gray-200"
+                >
+                  <option value="">Legacy single-character target</option>
+                  {(state?.identities ?? []).map(identity => (
+                    <option key={identity.id} value={identity.id}>
+                      {identity.display_name} · {identity.trigger_word}
+                    </option>
+                  ))}
+                </select>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    value={newIdentityName}
+                    onChange={event => setNewIdentityName(event.target.value)}
+                    placeholder="Display name"
+                    className="min-w-0 rounded border border-gray-700 bg-gray-950 px-2.5 py-2 text-gray-100"
+                  />
+                  <input
+                    value={newIdentityTrigger}
+                    onChange={event => setNewIdentityTrigger(event.target.value)}
+                    placeholder="Trigger word"
+                    className="min-w-0 rounded border border-gray-700 bg-gray-950 px-2.5 py-2 text-gray-100"
+                  />
+                  <input
+                    value={newIdentityClass}
+                    onChange={event => setNewIdentityClass(event.target.value)}
+                    placeholder="Generic class prompt"
+                    className="col-span-2 min-w-0 rounded border border-gray-700 bg-gray-950 px-2.5 py-2 text-gray-100"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={Boolean(busy) || !newIdentityName.trim() || !newIdentityTrigger.trim() || !newIdentityClass.trim()}
+                  onClick={createIdentity}
+                  className="flex w-full items-center justify-center gap-2 rounded border border-violet-700 px-3 py-2 text-violet-200 hover:bg-violet-950/50 disabled:opacity-40"
+                >
+                  {busy === 'identity' ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                  Add identity
+                </button>
+                {state?.identity && (
+                  <p className="rounded bg-gray-950 p-2 text-[11px] text-gray-400">
+                    Active counterfactual: replace <span className="text-violet-300">{state.identity.trigger_word}</span> with{' '}
+                    <span className="text-violet-300">{state.identity.class_prompt}</span>, while leaving other named characters in the caption unchanged.
+                  </p>
+                )}
+              </section>
 
               {hasVisual && (
                 <section className="space-y-3">

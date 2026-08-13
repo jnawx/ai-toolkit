@@ -43,6 +43,29 @@ video_extensions = ['.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.f
 audio_extensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a']
 
 
+def expand_character_identity_file_items(file_items):
+    """Create one virtual training item per named identity annotation."""
+    expanded = []
+    for file_item in file_items:
+        identity_views = getattr(file_item, "character_dop_identity_views", [])
+        if not identity_views:
+            if (
+                getattr(file_item, "character_dop_identity_catalog_present", False)
+                and file_item.trigger_word is None
+                and not file_item.is_reg
+            ):
+                raise ValueError(
+                    f"Character DOP media is not assigned to any named identity: {file_item.path}"
+                )
+            expanded.append(file_item)
+            continue
+        for identity_view in identity_views:
+            identity_item = copy.deepcopy(file_item)
+            identity_item.bind_character_dop_identity(identity_view)
+            expanded.append(identity_item)
+    return expanded
+
+
 class RescaleTransform:
     """Transform to rescale images to the range [-1, 1]."""
 
@@ -588,6 +611,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                     print_acc(f"Error processing image: {file}")
                 print_acc(e)
                 bad_count += 1
+
+        self.file_list = expand_character_identity_file_items(self.file_list)
 
         # save the size database
         with open(dataset_size_file, 'w') as f:

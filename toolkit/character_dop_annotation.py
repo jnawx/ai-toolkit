@@ -1,11 +1,16 @@
 import json
 import base64
 import io
+import os
+import re
+import tempfile
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
+from filelock import FileLock
 from PIL import Image
 
 from toolkit.character_dop_schema import validate_character_audio_intervals
@@ -18,6 +23,15 @@ MAX_AUTO_MASK_EDGE = 768
 MAX_AUTO_MASK_COUNT = 64
 MAX_AUTO_MASK_DATA_URL_LENGTH = 2 * 1024 * 1024
 MAX_AUTO_MASK_TOTAL_DATA_URL_LENGTH = 24 * 1024 * 1024
+CHARACTER_IDENTITY_CATALOG_VERSION = 1
+CHARACTER_IDENTITY_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+MAX_CHARACTER_IDENTITIES = 64
+MAX_CHARACTER_IDENTITY_CATALOG_BYTES = 128 * 1024
+CHARACTER_IDENTITY_TEXT_LIMITS = {
+    "display name": (128, 512),
+    "trigger word": (128, 512),
+    "class prompt": (256, 1024),
+}
 
 
 def is_character_annotation_artifact(file_path: Path, dataset_dir: Path) -> bool:
@@ -33,12 +47,227 @@ def _append_suffix(path: Path, suffix: str) -> Path:
     return path.parent / f"{path.name}{suffix}"
 
 
+def _annotation_storage_path(dataset_dir: Path, *relative_parts: Any) -> Path:
+    """Resolve an annotation path and reject symlink/junction escapes."""
+    dataset_root = Path(dataset_dir).resolve(strict=True)
+    relative_path = Path(*relative_parts)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ValueError("character annotation storage path must be inside the dataset")
+    storage_path = (dataset_root / relative_path).resolve(strict=False)
+    def containment_form(path: Path) -> Path:
+        normalized = os.path.normcase(str(path))
+        if normalized.startswith("\\\\?\\UNC\\"):
+            normalized = "\\\\" + normalized[8:]
+        elif normalized.startswith("\\\\?\\"):
+            normalized = normalized[4:]
+        return Path(normalized)
+
+    try:
+        containment_form(storage_path).relative_to(containment_form(dataset_root))
+    except ValueError as exc:
+        raise ValueError("character annotation storage path escapes the dataset") from exc
+    return storage_path
+
+
+def _identity_catalog_path(dataset_dir: Path) -> Path:
+    return _annotation_storage_path(dataset_dir, ANNOTATION_DIRECTORY, "identities.json")
+
+
+def _identity_catalog_lock_path(dataset_dir: Path) -> Path:
+    return _annotation_storage_path(dataset_dir, ANNOTATION_DIRECTORY, ".identities.lock")
+
+
+def _validate_identity_id(identity_id: str) -> str:
+    identity_id = str(identity_id).strip()
+    if not CHARACTER_IDENTITY_ID_PATTERN.fullmatch(identity_id):
+        raise ValueError(
+            "character identity id must use 1-64 lowercase letters, numbers, hyphens, or underscores"
+        )
+    return identity_id
+
+
+def _required_identity_text(value: str, field: str) -> str:
+    value = str(value).strip()
+    if not value:
+        raise ValueError(f"character identity {field} cannot be blank")
+    max_chars, max_bytes = CHARACTER_IDENTITY_TEXT_LIMITS[field]
+    if len(value) > max_chars or len(value.encode("utf-8")) > max_bytes:
+        raise ValueError(
+            f"character identity {field} must be at most {max_chars} characters "
+            f"and {max_bytes} UTF-8 bytes"
+        )
+    return value
+
+
+@lru_cache(maxsize=128)
+def _read_character_identity_catalog(
+    catalog_path: str,
+    modified_ns: int,
+    size: int,
+) -> Any:
+    del modified_ns, size
+    return json.loads(Path(catalog_path).read_text(encoding="utf-8"))
+
+
+def list_character_identities(dataset_dir: Path) -> list[dict]:
+    """Return the dataset's named character identities in display order."""
+    catalog_path = _identity_catalog_path(dataset_dir)
+    if not catalog_path.exists():
+        return []
+    stat = catalog_path.stat()
+    if stat.st_size > MAX_CHARACTER_IDENTITY_CATALOG_BYTES:
+        raise ValueError(
+            f"character identity catalog exceeds {MAX_CHARACTER_IDENTITY_CATALOG_BYTES} bytes"
+        )
+    payload = _read_character_identity_catalog(
+        str(catalog_path),
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
+    if not isinstance(payload, dict) or payload.get("version") != CHARACTER_IDENTITY_CATALOG_VERSION:
+        raise ValueError("unsupported character identity catalog version")
+    raw_identities = payload.get("identities")
+    if not isinstance(raw_identities, list):
+        raise ValueError("character identity catalog must contain an identities list")
+    if len(raw_identities) > MAX_CHARACTER_IDENTITIES:
+        raise ValueError(
+            f"character identity catalog supports at most {MAX_CHARACTER_IDENTITIES} identities"
+        )
+    identities = []
+    seen_ids = set()
+    seen_triggers = set()
+    for raw_identity in raw_identities:
+        if not isinstance(raw_identity, dict):
+            raise ValueError("each character identity must be an object")
+        identity = {
+            "id": _validate_identity_id(raw_identity.get("id", "")),
+            "display_name": _required_identity_text(
+                raw_identity.get("display_name", ""), "display name"
+            ),
+            "trigger_word": _required_identity_text(
+                raw_identity.get("trigger_word", ""), "trigger word"
+            ),
+            "class_prompt": _required_identity_text(
+                raw_identity.get("class_prompt", ""), "class prompt"
+            ),
+        }
+        if identity["id"] in seen_ids:
+            raise ValueError(f"duplicate character identity id: {identity['id']}")
+        trigger_key = identity["trigger_word"].casefold()
+        if trigger_key in seen_triggers:
+            raise ValueError(
+                f"duplicate character identity trigger word: {identity['trigger_word']}"
+            )
+        if any(
+            existing_trigger in trigger_key or trigger_key in existing_trigger
+            for existing_trigger in seen_triggers
+        ):
+            raise ValueError(
+                "character identity trigger words cannot contain one another because "
+                "DOP replaces one active trigger at a time"
+            )
+        seen_ids.add(identity["id"])
+        seen_triggers.add(trigger_key)
+        identities.append(identity)
+    return [dict(identity) for identity in identities]
+
+
+def save_character_identity(
+    *,
+    dataset_dir: Path,
+    identity_id: str,
+    display_name: str,
+    trigger_word: str,
+    class_prompt: str,
+) -> dict:
+    """Create or update one named identity in a dataset-level catalog."""
+    identity = {
+        "id": _validate_identity_id(identity_id),
+        "display_name": _required_identity_text(display_name, "display name"),
+        "trigger_word": _required_identity_text(trigger_word, "trigger word"),
+        "class_prompt": _required_identity_text(class_prompt, "class prompt"),
+    }
+    catalog_path = _identity_catalog_path(dataset_dir)
+    lock_path = _identity_catalog_lock_path(dataset_dir)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(lock_path), timeout=30):
+        identities = list_character_identities(dataset_dir)
+        for existing in identities:
+            if (
+                existing["id"] != identity["id"]
+                and existing["trigger_word"].casefold() == identity["trigger_word"].casefold()
+            ):
+                raise ValueError(
+                    f"character identity trigger word is already used by {existing['display_name']}"
+                )
+            if existing["id"] != identity["id"] and (
+                existing["trigger_word"].casefold() in identity["trigger_word"].casefold()
+                or identity["trigger_word"].casefold() in existing["trigger_word"].casefold()
+            ):
+                raise ValueError(
+                    "character identity trigger words cannot contain one another because "
+                    "DOP replaces one active trigger at a time"
+                )
+        matching_index = next(
+            (index for index, existing in enumerate(identities) if existing["id"] == identity["id"]),
+            None,
+        )
+        if matching_index is None:
+            if len(identities) >= MAX_CHARACTER_IDENTITIES:
+                raise ValueError(
+                    f"character identity catalog supports at most {MAX_CHARACTER_IDENTITIES} identities"
+                )
+            identities.append(identity)
+        else:
+            identities[matching_index] = identity
+        payload = {
+            "version": CHARACTER_IDENTITY_CATALOG_VERSION,
+            "identities": identities,
+        }
+        if len(_json_text(payload).encode("utf-8")) > MAX_CHARACTER_IDENTITY_CATALOG_BYTES:
+            raise ValueError(
+                f"character identity catalog exceeds {MAX_CHARACTER_IDENTITY_CATALOG_BYTES} bytes"
+            )
+        _write_json(catalog_path, payload)
+        _read_character_identity_catalog.cache_clear()
+    return identity
+
+
+def _require_character_identity(dataset_dir: Path, identity_id: Optional[str]) -> Optional[dict]:
+    if identity_id is None:
+        return None
+    identity_id = _validate_identity_id(identity_id)
+    identity = next(
+        (
+            candidate
+            for candidate in list_character_identities(dataset_dir)
+            if candidate["id"] == identity_id
+        ),
+        None,
+    )
+    if identity is None:
+        raise ValueError(f"unknown character identity: {identity_id}")
+    return identity
+
+
 @dataclass(frozen=True)
 class CharacterAnnotationPaths:
     root: Path
     visual: Path
     audio: Path
     prompts: Path
+
+
+@dataclass(frozen=True)
+class CharacterIdentityView:
+    """One named identity's training annotations for a physical media item."""
+
+    identity_id: str
+    display_name: str
+    trigger_word: str
+    class_prompt: str
+    visual_path: Optional[Path]
+    audio_intervals: Optional[list[tuple[float, float]]]
 
 
 def _resolved_media(dataset_dir: Path, media_path: Path) -> tuple[Path, Path]:
@@ -57,18 +286,67 @@ def get_character_annotation_paths(
     *,
     dataset_dir: Path,
     media_path: Path,
+    identity_id: Optional[str] = None,
 ) -> CharacterAnnotationPaths:
     """Resolve one item's built-in annotation files without trusting client paths."""
     dataset_dir, relative_media = _resolved_media(dataset_dir, media_path)
     relative_stem = relative_media.with_suffix("")
-    root = dataset_dir / ANNOTATION_DIRECTORY
+    root_parts = [ANNOTATION_DIRECTORY]
+    if identity_id is not None:
+        root_parts.extend(("identities", _validate_identity_id(identity_id)))
+    root = _annotation_storage_path(dataset_dir, ANNOTATION_DIRECTORY)
     visual_suffix = ".png" if relative_media.suffix.lower() in VISUAL_MASK_EXTENSIONS else ".npy"
     return CharacterAnnotationPaths(
         root=root,
-        visual=root / "visual" / _append_suffix(relative_stem, visual_suffix),
-        audio=root / "audio" / _append_suffix(relative_stem, ".json"),
-        prompts=root / "prompts" / _append_suffix(relative_stem, ".json"),
+        visual=_annotation_storage_path(
+            dataset_dir, *root_parts, "visual", _append_suffix(relative_stem, visual_suffix)
+        ),
+        audio=_annotation_storage_path(
+            dataset_dir, *root_parts, "audio", _append_suffix(relative_stem, ".json")
+        ),
+        prompts=_annotation_storage_path(
+            dataset_dir, *root_parts, "prompts", _append_suffix(relative_stem, ".json")
+        ),
     )
+
+
+def get_character_identity_views(
+    *,
+    dataset_dir: Path,
+    media_path: Path,
+) -> list[CharacterIdentityView]:
+    """Return annotated named identities as independent views of one media item."""
+    views = []
+    for identity in list_character_identities(dataset_dir):
+        paths = get_character_annotation_paths(
+            dataset_dir=dataset_dir,
+            media_path=media_path,
+            identity_id=identity["id"],
+        )
+        audio_intervals = None
+        if paths.audio.exists():
+            payload = json.loads(paths.audio.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and "character_intervals" not in payload:
+                raise ValueError(
+                    f"Character DOP audio sidecar must contain 'character_intervals': {paths.audio}"
+                )
+            audio_intervals = validate_character_audio_intervals(
+                payload.get("character_intervals", []) if isinstance(payload, dict) else payload
+            )
+        visual_path = paths.visual if paths.visual.exists() else None
+        if visual_path is None and audio_intervals is None:
+            continue
+        views.append(
+            CharacterIdentityView(
+                identity_id=identity["id"],
+                display_name=identity["display_name"],
+                trigger_word=identity["trigger_word"],
+                class_prompt=identity["class_prompt"],
+                visual_path=visual_path,
+                audio_intervals=audio_intervals,
+            )
+        )
+    return views
 
 
 def find_matching_character_visual_mask(
@@ -97,14 +375,28 @@ def find_matching_character_visual_mask(
     return None
 
 
+def _json_text(payload: Any) -> str:
+    return json.dumps(payload, indent=2) + "\n"
+
+
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
-    temporary_path.write_text(
-        json.dumps(payload, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary_path.replace(path)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(_json_text(payload))
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _mask_data_url(mask: np.ndarray) -> str:
@@ -239,10 +531,13 @@ def save_character_audio_intervals(
     dataset_dir: Path,
     media_path: Path,
     intervals: Sequence[Sequence[float]],
+    identity_id: Optional[str] = None,
 ) -> Path:
+    _require_character_identity(dataset_dir, identity_id)
     paths = get_character_annotation_paths(
         dataset_dir=dataset_dir,
         media_path=media_path,
+        identity_id=identity_id,
     )
     validated = validate_character_audio_intervals(list(intervals))
     _write_json(
@@ -258,10 +553,13 @@ def save_character_visual_mask(
     dataset_dir: Path,
     media_path: Path,
     mask: np.ndarray,
+    identity_id: Optional[str] = None,
 ) -> Path:
+    _require_character_identity(dataset_dir, identity_id)
     paths = get_character_annotation_paths(
         dataset_dir=dataset_dir,
         media_path=media_path,
+        identity_id=identity_id,
     )
     mask = np.asarray(mask)
     if mask.ndim == 2:
@@ -310,6 +608,7 @@ def track_character_visual_mask(
     *,
     dataset_dir: Path,
     media_path: Path,
+    identity_id: Optional[str] = None,
     prompts: Any,
     tracker: Callable[
         [Path, list[dict], Optional[np.ndarray], Optional[float], Callable[[str], None]],
@@ -319,9 +618,11 @@ def track_character_visual_mask(
     initial_time_seconds: Optional[float] = None,
     progress: Callable[[str], None] = lambda _message: None,
 ) -> dict:
+    _require_character_identity(dataset_dir, identity_id)
     paths = get_character_annotation_paths(
         dataset_dir=dataset_dir,
         media_path=media_path,
+        identity_id=identity_id,
     )
     initial_mask = (
         _combine_mask_data_urls(initial_mask_data_urls)
@@ -351,11 +652,13 @@ def track_character_visual_mask(
         dataset_dir=dataset_dir,
         media_path=media_path,
         mask=mask,
+        identity_id=identity_id,
     )
     _write_json(paths.prompts, {"prompts": validated_prompts})
     return get_character_annotation_state(
         dataset_dir=dataset_dir,
         media_path=media_path,
+        identity_id=identity_id,
     )
 
 
@@ -364,10 +667,13 @@ def get_character_mask_preview(
     dataset_dir: Path,
     media_path: Path,
     frame_index: int,
+    identity_id: Optional[str] = None,
 ) -> dict:
+    _require_character_identity(dataset_dir, identity_id)
     paths = get_character_annotation_paths(
         dataset_dir=dataset_dir,
         media_path=media_path,
+        identity_id=identity_id,
     )
     if not paths.visual.exists():
         raise FileNotFoundError("character visual mask has not been generated")
@@ -396,10 +702,13 @@ def get_character_annotation_state(
     *,
     dataset_dir: Path,
     media_path: Path,
+    identity_id: Optional[str] = None,
 ) -> dict:
+    identity = _require_character_identity(dataset_dir, identity_id)
     paths = get_character_annotation_paths(
         dataset_dir=dataset_dir,
         media_path=media_path,
+        identity_id=identity_id,
     )
     intervals = []
     if paths.audio.exists():
@@ -419,6 +728,8 @@ def get_character_annotation_state(
             visual_shape = list(np.load(paths.visual, mmap_mode="r", allow_pickle=False).shape)
     return {
         "root": str(paths.root),
+        "identity": identity,
+        "identities": list_character_identities(dataset_dir),
         "visual": {
             "exists": paths.visual.exists(),
             "path": str(paths.visual),

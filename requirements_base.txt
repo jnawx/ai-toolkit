@@ -29,6 +29,7 @@ pytorch_fid
 optimum-quanto==0.2.4
 sentencepiece
 huggingface_hub==1.23.0
+filelock>=3.20.0,<4
 peft==0.18.1
 gradio
 python-slugify

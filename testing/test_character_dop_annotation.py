@@ -5,25 +5,292 @@ import base64
 import io
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from toolkit.character_dop_annotation import (
+    MAX_CHARACTER_IDENTITIES,
     detect_character_instances,
     find_matching_character_visual_mask,
     get_character_mask_preview,
     get_character_annotation_paths,
+    get_character_identity_views,
     is_character_annotation_artifact,
     get_character_annotation_state,
+    list_character_identities,
     save_character_audio_intervals,
+    save_character_identity,
     save_character_visual_mask,
     track_character_visual_mask,
 )
 
 
 class CharacterDOPAnnotationStorageTests(unittest.TestCase):
+    def test_concurrent_identity_writers_preserve_every_catalog_entry(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+
+            def save_identity(index):
+                save_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id=f"person-{index}",
+                    display_name=f"Person {index}",
+                    trigger_word=f"Person{index}Token",
+                    class_prompt="a person",
+                )
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(save_identity, range(12)))
+
+            self.assertEqual(
+                {identity["id"] for identity in list_character_identities(dataset_dir)},
+                {f"person-{index}" for index in range(12)},
+            )
+
+    def test_identity_catalog_enforces_text_and_count_limits(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            with self.assertRaisesRegex(ValueError, "trigger word must be at most"):
+                save_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id="alice",
+                    display_name="Alice",
+                    trigger_word="x" * 129,
+                    class_prompt="a woman",
+                )
+
+            annotation_dir = dataset_dir / "_character_dop"
+            annotation_dir.mkdir()
+            oversized_catalog = {
+                "version": 1,
+                "identities": [
+                    {
+                        "id": f"person-{index}",
+                        "display_name": f"Person {index}",
+                        "trigger_word": f"Person{index}Token",
+                        "class_prompt": "a person",
+                    }
+                    for index in range(MAX_CHARACTER_IDENTITIES + 1)
+                ],
+            }
+            (annotation_dir / "identities.json").write_text(
+                json.dumps(oversized_catalog),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "supports at most"):
+                list_character_identities(dataset_dir)
+
+    def test_externally_edited_catalog_rejects_overlapping_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            annotation_dir = dataset_dir / "_character_dop"
+            annotation_dir.mkdir(parents=True)
+            (annotation_dir / "identities.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "identities": [
+                            {
+                                "id": "ann",
+                                "display_name": "Ann",
+                                "trigger_word": "AnnToken",
+                                "class_prompt": "a woman",
+                            },
+                            {
+                                "id": "anna",
+                                "display_name": "Anna",
+                                "trigger_word": "AnnToken2",
+                                "class_prompt": "a woman",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "cannot contain one another"):
+                list_character_identities(dataset_dir)
+
+    def test_annotation_storage_rejects_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_root = Path(tmp_dir)
+            dataset_dir = temp_root / "dataset"
+            outside_dir = temp_root / "outside"
+            dataset_dir.mkdir()
+            outside_dir.mkdir()
+            media_path = dataset_dir / "portrait.jpg"
+            media_path.touch()
+            try:
+                (dataset_dir / "_character_dop").symlink_to(
+                    outside_dir,
+                    target_is_directory=True,
+                )
+            except OSError as exc:
+                self.skipTest(f"directory symlinks are unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "escapes the dataset"):
+                save_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id="alice",
+                    display_name="Alice",
+                    trigger_word="AliceToken",
+                    class_prompt="a woman",
+                )
+
+    def test_two_identities_can_annotate_the_same_media_without_duplicate_files(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "together.mp4"
+            media_path.touch()
+
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a woman",
+            )
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="bob",
+                display_name="Bob",
+                trigger_word="BobToken",
+                class_prompt="a man",
+            )
+            alice_mask = np.zeros((1, 3, 4), dtype=np.uint8)
+            alice_mask[:, :, :2] = 1
+            bob_mask = np.zeros((1, 3, 4), dtype=np.uint8)
+            bob_mask[:, :, 2:] = 1
+
+            alice_path = save_character_visual_mask(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="alice",
+                mask=alice_mask,
+            )
+            bob_path = save_character_visual_mask(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="bob",
+                mask=bob_mask,
+            )
+            save_character_audio_intervals(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="alice",
+                intervals=[[0.0, 1.0]],
+            )
+            save_character_audio_intervals(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="bob",
+                intervals=[[1.0, 2.0]],
+            )
+
+            self.assertNotEqual(alice_path, bob_path)
+            self.assertEqual(
+                [identity["id"] for identity in list_character_identities(dataset_dir)],
+                ["alice", "bob"],
+            )
+            self.assertEqual(
+                get_character_annotation_state(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id="alice",
+                )["audio"]["intervals"],
+                [[0.0, 1.0]],
+            )
+            self.assertEqual(
+                get_character_annotation_state(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id="bob",
+                )["audio"]["intervals"],
+                [[1.0, 2.0]],
+            )
+
+    def test_identity_catalog_rejects_unsafe_ids_and_duplicate_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            with self.assertRaisesRegex(ValueError, "identity id"):
+                save_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id="../alice",
+                    display_name="Alice",
+                    trigger_word="AliceToken",
+                    class_prompt="a woman",
+                )
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a woman",
+            )
+            with self.assertRaisesRegex(ValueError, "already used"):
+                save_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id="alice-copy",
+                    display_name="Alice copy",
+                    trigger_word="alicetoken",
+                    class_prompt="a woman",
+                )
+
+    def test_named_annotations_become_independent_training_views(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "together.mp4"
+            media_path.touch()
+            for identity_id, trigger_word, class_prompt, interval in (
+                ("alice", "AliceToken", "a woman", [0.0, 1.0]),
+                ("bob", "BobToken", "a man", [1.0, 2.0]),
+            ):
+                save_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id=identity_id,
+                    display_name=identity_id.title(),
+                    trigger_word=trigger_word,
+                    class_prompt=class_prompt,
+                )
+                save_character_visual_mask(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id=identity_id,
+                    mask=np.ones((1, 2, 2), dtype=np.uint8),
+                )
+                save_character_audio_intervals(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id=identity_id,
+                    intervals=[interval],
+                )
+
+            views = get_character_identity_views(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+            )
+
+            self.assertEqual(
+                [
+                    (view.identity_id, view.trigger_word, view.class_prompt, view.audio_intervals)
+                    for view in views
+                ],
+                [
+                    ("alice", "AliceToken", "a woman", [(0.0, 1.0)]),
+                    ("bob", "BobToken", "a man", [(1.0, 2.0)]),
+                ],
+            )
+            self.assertTrue(all(view.visual_path.is_file() for view in views))
+
     def test_auto_mask_returns_each_detected_person_as_a_selectable_mask(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_dir = Path(tmp_dir) / "dataset"
@@ -189,6 +456,50 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
             self.assertTrue(state["visual"]["exists"])
             self.assertEqual(state["visual"]["shape"], [2, 3, 4])
 
+    def test_visual_tracking_writes_only_the_selected_named_identity(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "together.mp4"
+            media_path.touch()
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a woman",
+            )
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="bob",
+                display_name="Bob",
+                trigger_word="BobToken",
+                class_prompt="a man",
+            )
+
+            state = track_character_visual_mask(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="bob",
+                prompts=[
+                    {
+                        "time_seconds": 0.0,
+                        "points": [{"x": 0.5, "y": 0.5, "label": 1}],
+                    }
+                ],
+                tracker=lambda *_args: np.ones((2, 3, 4), dtype=np.uint8),
+            )
+
+            self.assertEqual(state["identity"]["id"], "bob")
+            self.assertTrue(state["visual"]["exists"])
+            self.assertFalse(
+                get_character_annotation_state(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id="alice",
+                )["visual"]["exists"]
+            )
+
     def test_selected_auto_masks_are_combined_and_seed_visual_tracking(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_dir = Path(tmp_dir) / "dataset"
@@ -283,6 +594,42 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
             state = json.loads(completed.stdout.strip().splitlines()[-1])
 
             self.assertEqual(state["audio"]["intervals"], [[0.25, 0.75]])
+
+    def test_ui_script_creates_and_selects_a_named_identity(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "portrait.jpg"
+            Image.new("RGB", (4, 4)).save(media_path)
+            script_path = Path(__file__).parents[1] / "ui_scripts" / "character_dop_annotator.py"
+
+            created = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "save-identity",
+                    "--dataset-dir",
+                    str(dataset_dir),
+                    "--media-path",
+                    str(media_path),
+                    "--payload-stdin",
+                ],
+                input=json.dumps(
+                    {
+                        "identity_id": "alice",
+                        "display_name": "Alice",
+                        "trigger_word": "AliceToken",
+                        "class_prompt": "a woman",
+                    }
+                ),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            state = json.loads(created.stdout.strip().splitlines()[-1])
+
+            self.assertEqual(state["identity"]["id"], "alice")
+            self.assertEqual(state["identities"][0]["trigger_word"], "AliceToken")
 
     def test_ui_script_exposes_supported_character_mask_models(self):
         completed = subprocess.run(

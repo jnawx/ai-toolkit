@@ -327,7 +327,14 @@ const docs: { [key: string]: ConfigDoc } = {
         is absent but cannot identify individual speakers. Sparse DOP schedules are automatically multiplied by their
         interval. Rebuild old latent caches when first adding temporal visual or audio annotations so their sampled-frame
         and clip-timing metadata is stored. Annotations created from the dataset viewer are discovered automatically and
-        invalidate only the edited media item&apos;s generated latent cache, so these path fields can remain blank.
+        invalidate only the edited media item&apos;s generated latent cache, so these path fields can remain blank. The
+        dataset annotator can also define multiple named identities, each with its own trigger, generic class, visual
+        mask, and speaking intervals on the same physical media. Training automatically creates one virtual view per
+        annotated identity: only that view&apos;s trigger is replaced in its DOP prompt, while the other named characters
+        remain explicit and protected. Captions for shared scenes should name every visible character unambiguously. A
+        job made entirely from named identities does not need a global trigger, but every non-regularization media item
+        must then be assigned to at least one identity; training fails early rather than silently using an invalid DOP
+        comparison.
       </>
     ),
   },

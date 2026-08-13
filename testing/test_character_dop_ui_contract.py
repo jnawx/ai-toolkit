@@ -68,6 +68,35 @@ class CharacterDOPUIContractTests(unittest.TestCase):
         self.assertIn('label="Character Audio Training Multiplier"', source)
         self.assertIn("train.character_training_audio_multiplier", source)
 
+    def test_character_annotator_can_create_and_switch_named_identities(self):
+        source = (
+            Path(__file__).parents[1]
+            / "ui"
+            / "src"
+            / "components"
+            / "CharacterDOPAnnotator.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Character identities", source)
+        self.assertIn("request('save-identity'", source)
+        self.assertIn("identityId: activeIdentityId", source)
+        self.assertIn('aria-label="Character identity"', source)
+        self.assertIn('placeholder="Trigger word"', source)
+        self.assertIn('placeholder="Generic class prompt"', source)
+
+    def test_character_annotator_persists_legacy_selection_and_ignores_stale_previews(self):
+        source = (
+            Path(__file__).parents[1]
+            / "ui"
+            / "src"
+            / "components"
+            / "CharacterDOPAnnotator.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("CHARACTER_DOP_LEGACY_IDENTITY", source)
+        self.assertIn("storedIdentityId === CHARACTER_DOP_LEGACY_IDENTITY", source)
+        self.assertIn("if (!cancelled) setPreview(data.data_url)", source)
+
 
 if __name__ == "__main__":
     unittest.main()

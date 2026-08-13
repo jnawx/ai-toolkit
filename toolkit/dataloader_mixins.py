@@ -47,7 +47,11 @@ from toolkit.character_dop import (
     load_character_audio_intervals,
     prepare_temporal_character_mask,
 )
-from toolkit.character_dop_annotation import find_matching_character_visual_mask
+from toolkit.character_dop_annotation import (
+    find_matching_character_visual_mask,
+    get_character_identity_views,
+    list_character_identities,
+)
 
 if TYPE_CHECKING:
     from toolkit.data_loader import AiToolkitDataset
@@ -369,8 +373,12 @@ class CaptionProcessingDTOMixin:
             # do it on the final caption so token order matches the normal caption
             self.caption_dop = self.caption
             if self.trigger_word is not None:
+                class_prompt = (
+                    getattr(self, "character_dop_class_prompt", None)
+                    or self.dataset_config.diff_output_preservation_class
+                )
                 self.caption_dop = self.caption.replace(
-                    self.trigger_word, self.dataset_config.diff_output_preservation_class
+                    self.trigger_word, class_prompt
                 )
 
     def get_caption(
@@ -1573,6 +1581,10 @@ class MaskFileItemDTOMixin:
         self.character_dop_visual_mask_path: Union[str, None] = None
         self.character_dop_visual_mask_tensor: Union[torch.Tensor, None] = None
         self.character_dop_audio_intervals = None
+        self.character_dop_identity_views = []
+        self.character_dop_identity_catalog_present = False
+        self.character_dop_identity_id = None
+        self.character_dop_class_prompt = None
         self.use_alpha_as_mask: bool = False
         dataset_config: 'DatasetConfig' = kwargs.get('dataset_config', None)
         self.mask_min_value = dataset_config.mask_min_value
@@ -1615,6 +1627,38 @@ class MaskFileItemDTOMixin:
             if matching_mask is not None:
                 self.character_dop_visual_mask_path = str(matching_mask)
                 self.has_character_dop_visual_mask = True
+        if (
+            dataset_config.diff_output_preservation
+            and dataset_config.character_dop_use_dataset_annotations
+            and dataset_config.folder_path is not None
+        ):
+            self.character_dop_identity_catalog_present = bool(
+                list_character_identities(Path(dataset_config.folder_path))
+            )
+            self.character_dop_identity_views = get_character_identity_views(
+                dataset_dir=Path(dataset_config.folder_path),
+                media_path=Path(kwargs.get('path', None)),
+            )
+
+    def bind_character_dop_identity(self: 'FileItemDTO', identity_view) -> None:
+        """Bind this virtual file item to one named identity annotation."""
+        self.character_dop_identity_id = identity_view.identity_id
+        self.character_dop_class_prompt = identity_view.class_prompt
+        self.character_dop_identity_views = []
+        self.trigger_word = identity_view.trigger_word
+        self.character_dop_visual_mask_path = (
+            str(identity_view.visual_path)
+            if identity_view.visual_path is not None
+            else None
+        )
+        self.has_character_dop_visual_mask = identity_view.visual_path is not None
+        self.character_dop_visual_mask_tensor = None
+        self.character_dop_audio_intervals = identity_view.audio_intervals
+        # This item is now a distinct virtual cache view. Clear any path memoized
+        # before expansion so its identity becomes part of the cache key.
+        self._latent_path = None
+        self._dop_text_embedding_path = None
+        self._dop_blank_text_embedding_path = None
 
     def _load_mask_tensor_from_path(
         self: 'FileItemDTO',
@@ -1908,6 +1952,12 @@ class LatentCachingFileItemDTOMixin:
         if self.dataset_config.cache_tensors_to_disk:
             # tensor is stored in the cache file, invalidate caches made without it
             item["cache_tensors_to_disk"] = True
+        character_identity_id = getattr(self, "character_dop_identity_id", None)
+        if character_identity_id is not None:
+            # Named identity views can select different video windows concurrently.
+            # Keep their cache files independent so frame/audio metadata and masks
+            # can never be paired with another identity's latent.
+            item["character_dop_identity_id"] = character_identity_id
         return item
 
     def get_latent_path(self: 'FileItemDTO', recalculate=False):
@@ -2326,8 +2376,12 @@ class TextEmbeddingFileItemDTOMixin:
         # dropped caption (class only), so the cached DOP dropout caption must match
         dropout_caption = self.get_dropout_caption()
         if self.trigger_word is not None:
+            class_prompt = (
+                getattr(self, "character_dop_class_prompt", None)
+                or self.dataset_config.diff_output_preservation_class
+            )
             return dropout_caption.replace(
-                self.trigger_word, self.dataset_config.diff_output_preservation_class
+                self.trigger_word, class_prompt
             )
         return dropout_caption
 

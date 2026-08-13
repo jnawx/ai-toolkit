@@ -42,11 +42,52 @@ from PIL import Image
 from torchvision.transforms import functional as TF
 from toolkit.basic import flush
 from toolkit.character_dop import apply_character_training_weight, character_dop_losses
+from toolkit.character_dop_annotation import list_character_identities
 
 
 adapter_transforms = transforms.Compose([
     transforms.ToTensor(),
 ])
+
+
+def has_dop_trigger_source(*, trigger_word, dataset_configs, preservation_mode: str) -> bool:
+    """Return whether every trainable dataset can build a DOP counterfactual."""
+    if trigger_word is not None:
+        return True
+
+    def dataset_has_trigger_source(dataset) -> bool:
+        if getattr(dataset, "is_reg", False):
+            return True
+        if dataset.trigger_word is not None:
+            return True
+        return (
+            preservation_mode == "character"
+            and dataset.folder_path is not None
+            and dataset.character_dop_use_dataset_annotations
+            and bool(list_character_identities(dataset.folder_path))
+        )
+
+    return bool(dataset_configs) and all(
+        dataset_has_trigger_source(dataset) for dataset in dataset_configs
+    )
+
+
+def build_dop_prompt(
+    prompt: str,
+    *,
+    file_item,
+    fallback_trigger: Optional[str],
+    fallback_class_prompt: str,
+) -> str:
+    """Replace only the active file item's identity in a DOP counterfactual."""
+    trigger = file_item.trigger_word or fallback_trigger
+    if trigger is None:
+        return prompt
+    class_prompt = (
+        getattr(file_item, "character_dop_class_prompt", None)
+        or fallback_class_prompt
+    )
+    return prompt.replace(trigger, class_prompt)
 
 
 class SDTrainer(BaseSDTrainProcess):
@@ -91,10 +132,11 @@ class SDTrainer(BaseSDTrainProcess):
         
         if self.train_config.diff_output_preservation:
             # datasets can have their own trigger words, the global one is copied to them if not set
-            has_dataset_trigger = any(
-                dataset.trigger_word is not None for dataset in self.dataset_configs
-            )
-            if self.trigger_word is None and not has_dataset_trigger:
+            if not has_dop_trigger_source(
+                trigger_word=self.trigger_word,
+                dataset_configs=self.dataset_configs,
+                preservation_mode=self.train_config.diff_output_preservation_mode,
+            ):
                 raise ValueError("diff_output_preservation requires a trigger_word to be set")
             if self.network_config is None:
                 raise ValueError("diff_output_preservation requires a network to be set")
@@ -1841,10 +1883,12 @@ class SDTrainer(BaseSDTrainProcess):
                             if do_diff_output_preservation:
                                 # datasets can have their own trigger words, replace per item
                                 def replace_trigger_with_class(prompt, file_item):
-                                    trigger = file_item.trigger_word if file_item.trigger_word is not None else self.trigger_word
-                                    if trigger is None:
-                                        return prompt
-                                    return prompt.replace(trigger, self.train_config.diff_output_preservation_class)
+                                    return build_dop_prompt(
+                                        prompt,
+                                        file_item=file_item,
+                                        fallback_trigger=self.trigger_word,
+                                        fallback_class_prompt=self.train_config.diff_output_preservation_class,
+                                    )
                                 dop_prompts = [replace_trigger_with_class(p, fi) for p, fi in zip(conditioned_prompts, batch.file_items)]
                                 dop_prompts_2 = None
                                 if prompt_2 is not None:

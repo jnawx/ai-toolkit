@@ -31,12 +31,21 @@ const identityDraft = (identity: CharacterIdentity): Draft => ({
   captionDescription: identity.caption_description,
 });
 
+const newIdentityId = (triggerWord: string) => {
+  const slug = triggerWord.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'identity';
+  const randomSuffix = globalThis.crypto?.randomUUID
+    ? globalThis.crypto.randomUUID().slice(0, 8)
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${slug}-${randomSuffix}`;
+};
+
 export default function CharacterIdentityManager({ open, onClose }: Props) {
   const [identities, setIdentities] = useState<CharacterIdentity[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const request = useCallback(async (action: string, extra: Record<string, unknown> = {}) => {
     const response = await apiClient.post('/api/datasets/characterDop', { action, ...extra });
@@ -46,6 +55,7 @@ export default function CharacterIdentityManager({ open, onClose }: Props) {
   const reload = useCallback(async () => {
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       const result = await request('list-identities');
       setIdentities(result.identities ?? []);
@@ -65,10 +75,11 @@ export default function CharacterIdentityManager({ open, onClose }: Props) {
       setError('Display name, trigger word, DOP class, and caption description are required.');
       return;
     }
-    const identityId = editingId ?? `${draft.triggerWord.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48)}-${crypto.randomUUID().slice(0, 8)}`;
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
+      const identityId = editingId ?? newIdentityId(draft.triggerWord);
       const result = await request(editingId ? 'update-global-identity' : 'create-global-identity', {
         identityId,
         displayName: draft.displayName.trim(),
@@ -90,9 +101,16 @@ export default function CharacterIdentityManager({ open, onClose }: Props) {
     if (!window.confirm(`Delete ${identity.display_name} everywhere, including all masks and speaking intervals?`)) return;
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       const result = await request('delete-global-identity', { identityId: identity.id });
       setIdentities(result.identities ?? []);
+      if (result.cleanup_pending) {
+        const details = Array.isArray(result.cleanup_errors) && result.cleanup_errors.length
+          ? ` Affected datasets: ${result.cleanup_errors.join('; ')}`
+          : '';
+        setNotice(`The identity was deleted, but some annotation files require deferred cleanup.${details}`);
+      }
       if (editingId === identity.id) {
         setEditingId(null);
         setDraft(emptyDraft());
@@ -113,6 +131,7 @@ export default function CharacterIdentityManager({ open, onClose }: Props) {
             Identities are shared across every dataset. Their DOP class stays broad; their caption description replaces the trigger whenever that person is visible but is not the active training identity.
           </p>
           {busy && identities.length === 0 && <Loader2 className="animate-spin text-violet-400" />}
+          {notice && <p className="rounded border border-amber-800 bg-amber-950/30 p-2 text-xs text-amber-200">{notice}</p>}
           {identities.map(identity => (
             <div key={identity.id} className="rounded-lg border border-gray-700 bg-gray-950 p-3">
               <div className="flex items-start gap-2">

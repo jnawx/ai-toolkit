@@ -20,6 +20,13 @@ type Props = {
 
 const inputClass = 'rounded border border-gray-700 bg-gray-950 px-2 py-1.5 text-sm text-gray-100 outline-none focus:border-violet-500';
 const percent = (value: number | undefined, fallback: number) => Math.round((value ?? fallback) * 100);
+const coverageForDataset = (dataset: DatasetConfig, coverage: NonNullable<DatasetInventory['identities']>[number]) => {
+  const audioOnly = Boolean(dataset.do_audio) && (dataset.resolution?.length ?? 1) === 0;
+  const video = Boolean(dataset.auto_frame_count) || Number(dataset.num_frames ?? 1) > 1;
+  if (audioOnly) return [coverage.audio, coverage.videosAudio];
+  if (video) return [coverage.images, dataset.do_audio ? coverage.videos : coverage.videosVisual];
+  return [coverage.images];
+};
 
 export default function CharacterTrainingPanel({
   value,
@@ -61,7 +68,7 @@ export default function CharacterTrainingPanel({
         ?? Object.values(inventories).find(item => item.path.replace(/\\/g, '/').toLowerCase() === dataset.folder_path.replace(/\\/g, '/').toLowerCase());
       const coverage = inventory?.identities?.find(identity => identity.id === identityId);
       if (!coverage) continue;
-      for (const media of [coverage.images, coverage.videosVisual, coverage.videosAudio, coverage.audio]) {
+      for (const media of coverageForDataset(dataset, coverage)) {
         solo += media.solo;
         group += media.group;
       }
@@ -100,7 +107,7 @@ export default function CharacterTrainingPanel({
           ?? Object.values(inventories).find(item => normalize(item.path) === normalize(dataset.folder_path));
         const coverage = inventory?.identities?.find(identity => identity.id === selectedIdentity.id);
         const count = coverage
-          ? coverage.images.sources + coverage.videosVisual.sources + coverage.videosAudio.sources + coverage.audio.sources
+          ? coverageForDataset(dataset, coverage).reduce((sum, media) => sum + media.sources, 0)
           : 0;
         return { path: dataset.folder_path, count };
       });
@@ -133,7 +140,7 @@ export default function CharacterTrainingPanel({
       ?? Object.values(inventories).find(item => item.path.replace(/\\/g, '/').toLowerCase() === dataset.folder_path.replace(/\\/g, '/').toLowerCase());
     const coverage = inventory?.identities?.find(identity => identity.id === identityId);
     if (!coverage) return total;
-    return total + coverage.images.sources + coverage.videosVisual.sources + coverage.videosAudio.sources + coverage.audio.sources;
+    return total + coverageForDataset(dataset, coverage).reduce((sum, media) => sum + media.sources, 0);
   }, 0);
 
   const setSourcePercent = (identity: CharacterTrainingIdentityConfig, datasetPath: string, rawPercent: string) => {
@@ -197,7 +204,7 @@ export default function CharacterTrainingPanel({
                 <div className="mt-3 space-y-3 border-t border-gray-800 pt-3">
                   <div className="flex flex-wrap gap-3">
                     {(['image', 'video', 'audio'] as const).map(modality => (
-                      <label key={modality} className="text-xs capitalize text-gray-400">{modality} solo
+                      <label key={modality} className="text-xs capitalize text-gray-400">{modality === 'audio' ? 'audio-only' : modality} solo
                         <input className={`${inputClass} ml-1 w-20`} type="number" min="0" max="100" value={percent(config.context_fractions?.[modality], config.solo_fraction ?? 0.5)} onChange={event => updateIdentity(identity.id, { context_fractions: { ...config.context_fractions, [modality]: Math.max(0, Math.min(100, Number(event.target.value))) / 100 } })} />%
                       </label>
                     ))}

@@ -73,6 +73,7 @@ type Props = {
   mediaPath: string;
   onClose: () => void;
   embedded?: boolean;
+  captionText?: string;
 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -184,7 +185,7 @@ function SpeakingTimeline({
   );
 }
 
-export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, onClose, embedded = false }: Props) {
+export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, onClose, embedded = false, captionText = '' }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const identitySelectionInitializedRef = useRef(false);
@@ -466,11 +467,19 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       });
       setDetection(result);
       setSelectedCandidateIds([]);
-      setCandidateAssignments(Object.fromEntries(
+      const inferredAssignments: Record<number, string> = Object.fromEntries(
         result.candidates
           .filter(candidate => candidate.existing_identity_id)
           .map(candidate => [candidate.id, candidate.existing_identity_id as string]),
-      ));
+      );
+      const unmaskedCandidates = result.candidates.filter(candidate => !candidate.existing_identity_id);
+      const captionIdentities = (state?.identities ?? []).filter(identity =>
+        captionText.toLocaleLowerCase().includes(identity.trigger_word.toLocaleLowerCase()),
+      );
+      if (unmaskedCandidates.length === 1 && captionIdentities.length === 1) {
+        inferredAssignments[unmaskedCandidates[0].id] = captionIdentities[0].id;
+      }
+      setCandidateAssignments(inferredAssignments);
       if (result.candidates.length) {
         setPrompts(previous =>
           previous.filter(prompt => videoItem && Math.abs(prompt.time_seconds - seedTime) > 0.08),
@@ -479,7 +488,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       setShowPreview(false);
       setMessage(
         result.candidates.length
-          ? `Found ${result.candidates.length} ${result.concept} instance(s). Existing masks are recognized and protected. Assign only the unmasked people you want to add, or click one person to track it manually.${seedPointCount ? ` Cleared ${seedPointCount} seed-frame point(s) because the auto-mask replaces them.` : ''}`
+          ? `Found ${result.candidates.length} ${result.concept} instance(s). Existing masks are recognized and protected.${unmaskedCandidates.length === 1 && captionIdentities.length === 1 ? ` Suggested ${captionIdentities[0].display_name} from the caption; verify before saving.` : ''} Assign only the unmasked people you want to add, or click one person to track it manually.${seedPointCount ? ` Cleared ${seedPointCount} seed-frame point(s) because the auto-mask replaces them.` : ''}`
           : `SAM 3 did not find any instances matching “${result.concept}” on this frame.`,
       );
     } catch (reason: any) {
@@ -548,16 +557,21 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     videoRef.current?.pause();
     try {
       let activeState: AnnotationState | null = null;
-      for (const [index, candidate] of assignments.entries()) {
+      const groups = new Map<string, MaskCandidate[]>();
+      for (const candidate of assignments) {
         const identityId = candidateAssignments[candidate.id];
+        groups.set(identityId, [...(groups.get(identityId) ?? []), candidate]);
+      }
+      for (const [index, [identityId, candidates]] of [...groups.entries()].entries()) {
         const identity = state?.identities.find(item => item.id === identityId);
-        setMessage(`Tracking ${identity?.display_name ?? identityId} (${index + 1} of ${assignments.length}) without changing existing masks…`);
+        setMessage(`Tracking ${identity?.display_name ?? identityId} (${index + 1} of ${groups.size}) without changing existing masks…`);
         const nextState: AnnotationState = await request('track', {
           identityId,
           prompts: [],
-          initialMasks: [candidate.mask_data_url],
+          initialMasks: candidates.map(candidate => candidate.mask_data_url),
           initialTimeSeconds: detection.time_seconds,
           modelId: trackerModel,
+          preserveExisting: true,
         });
         if (identityId === activeIdentityId) activeState = nextState;
       }
@@ -572,7 +586,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       setCandidateAssignments({});
       setPreviewRevision(previous => previous + 1);
       setShowPreview(true);
-      setMessage(`Saved ${assignments.length} newly assigned identity mask(s). Existing annotations were left unchanged.`);
+      setMessage(`Saved ${groups.size} newly assigned identity mask(s) from ${assignments.length} person detection(s). Existing annotations were left unchanged.`);
     } catch (reason: any) {
       setError(reason?.response?.data?.error || reason.message || 'Assigned people could not be tracked');
     } finally {

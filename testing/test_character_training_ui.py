@@ -129,6 +129,40 @@ console.log(JSON.stringify(validateCharacterTrainingCoverage(
         errors = self.run_validation(strategy, datasets, stats)
         self.assertFalse(any("joint" in error.lower() for error in errors))
 
+    def test_audiovisual_video_is_one_video_context_pool(self):
+        strategy = {
+            "identities": [{
+                "id": "alice",
+                "weight": 1,
+                "context_fractions": {"video": 0, "audio": 1},
+            }],
+            "joint_training_fraction": 0,
+        }
+        datasets = [{
+            "folder_path": "/train",
+            "is_reg": False,
+            "do_audio": True,
+            "num_frames": 39,
+        }]
+        empty = {"sources": 0, "solo": 0, "group": 0}
+        stats = {
+            "/train": {
+                "path": "/train",
+                "identities": [{
+                    "id": "alice",
+                    "images": empty,
+                    "videos": {"sources": 1, "solo": 0, "group": 1},
+                    "videosVisual": empty,
+                    "videosAudio": {"sources": 1, "solo": 1, "group": 0},
+                    "audio": empty,
+                }],
+            }
+        }
+
+        errors = self.run_validation(strategy, datasets, stats)
+
+        self.assertEqual(errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()

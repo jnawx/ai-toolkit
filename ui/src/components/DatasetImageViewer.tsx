@@ -94,6 +94,7 @@ export default function DatasetImageViewer({
   const [showIdentityOverlays, setShowIdentityOverlays] = useState(true);
   const [identityOverlays, setIdentityOverlays] = useState<IdentityOverlay[]>([]);
   const [overlayTimeFraction, setOverlayTimeFraction] = useState(0);
+  const [overlayRevision, setOverlayRevision] = useState(0);
   const captionRef = useRef<string>('');
   const savedCaptionRef = useRef<string>('');
   const currentImgPathRef = useRef<string | null>(null);
@@ -139,7 +140,7 @@ export default function DatasetImageViewer({
       if (!controller.signal.aborted) setIdentityOverlays([]);
     });
     return () => controller.abort();
-  }, [datasetName, imgPath, isOpen, overlayTimeFraction, showIdentityOverlays]);
+  }, [datasetName, imgPath, isOpen, overlayRevision, overlayTimeFraction, showIdentityOverlays]);
 
   // Default to showing the editable boxes when an Ideogram caption is present.
   useEffect(() => {
@@ -474,7 +475,12 @@ export default function DatasetImageViewer({
   return createPortal(
     <Dialog
       open={isOpen}
-      onClose={() => showCharacterAnnotator ? setShowCharacterAnnotator(false) : onCancel()}
+      onClose={() => {
+        if (showCharacterAnnotator) {
+          setShowCharacterAnnotator(false);
+          setOverlayRevision(current => current + 1);
+        } else onCancel();
+      }}
       className="relative z-50"
     >
       <DialogBackdrop
@@ -714,7 +720,11 @@ export default function DatasetImageViewer({
                   open
                   datasetName={datasetName}
                   mediaPath={imgPath}
-                  onClose={() => setShowCharacterAnnotator(false)}
+                  captionText={caption}
+                  onClose={() => {
+                    setShowCharacterAnnotator(false);
+                    setOverlayRevision(current => current + 1);
+                  }}
                 />
               </div>
             )}

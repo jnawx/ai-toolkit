@@ -424,6 +424,17 @@ class CharacterDOPConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "MiniMax-H3"):
             validate_configs(train, model, SaveConfig(), [dataset])
 
+    def test_selected_identity_curriculum_requires_dop_to_be_enabled(self):
+        with self.assertRaisesRegex(ValueError, "requires diff_output_preservation"):
+            TrainConfig(
+                diff_output_preservation=False,
+                diff_output_preservation_mode="character",
+                character_training={
+                    "identities": [{"id": "alice", "weight": 1}],
+                    "joint_training_fraction": 0,
+                },
+            )
+
     def test_speaking_masks_require_an_audio_dataset(self):
         train = TrainConfig(diff_output_preservation_mode="character")
         model = ModelConfig(name_or_path="unused", arch="minimax_h3")

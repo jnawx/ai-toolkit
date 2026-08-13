@@ -19,6 +19,7 @@ type IdentityMediaCoverage = { sources: number; solo: number; group: number };
 export type IdentityCoverage = {
   id: string;
   images: IdentityMediaCoverage;
+  videos: IdentityMediaCoverage;
   videosVisual: IdentityMediaCoverage;
   videosAudio: IdentityMediaCoverage;
   audio: IdentityMediaCoverage;
@@ -274,6 +275,7 @@ export async function collectDatasetInventory(
     identities: activeIdentityIds.map(id => ({
       id,
       images: { sources: 0, solo: 0, group: 0 },
+      videos: { sources: 0, solo: 0, group: 0 },
       videosVisual: { sources: 0, solo: 0, group: 0 },
       videosAudio: { sources: 0, solo: 0, group: 0 },
       audio: { sources: 0, solo: 0, group: 0 },
@@ -336,6 +338,7 @@ export async function collectDatasetInventory(
     if (IMAGE_EXTENSIONS.has(extension)) {
       updateCoverage(identityAssignments.filter(assignment => assignment.visualImages.has(sourceStem)), 'images');
     } else if (VIDEO_EXTENSIONS.has(extension)) {
+      updateCoverage(sourceIdentities, 'videos');
       updateCoverage(identityAssignments.filter(assignment => assignment.visualTemporal.has(sourceStem)), 'videosVisual');
       updateCoverage(identityAssignments.filter(assignment => assignment.audio.has(sourceStem)), 'videosAudio');
     } else if (AUDIO_EXTENSIONS.has(extension)) {

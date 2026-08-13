@@ -934,12 +934,18 @@ export default function SimpleJob({
                               checked={
                                 jobConfig.config.process[0].train.diff_output_preservation_mode === 'character'
                               }
-                              onChange={value =>
+                              onChange={value => {
                                 setJobConfig(
                                   value ? 'character' : 'standard',
                                   'config.process[0].train.diff_output_preservation_mode',
-                                )
-                              }
+                                );
+                                if (!value) {
+                                  setJobConfig(
+                                    undefined,
+                                    'config.process[0].train.character_training',
+                                  );
+                                }
+                              }}
                             />
                             {jobConfig.config.process[0].train.diff_output_preservation_mode === 'character' && (
                               <>

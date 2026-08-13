@@ -497,6 +497,8 @@ class TrainConfig:
             )
         self.character_training = kwargs.get('character_training', None)
         if self.character_training is not None:
+            if not self.diff_output_preservation:
+                raise ValueError("character_training requires diff_output_preservation")
             if self.diff_output_preservation_mode != 'character':
                 raise ValueError("character_training requires Character LoRA DOP mode")
             if not isinstance(self.character_training, dict):

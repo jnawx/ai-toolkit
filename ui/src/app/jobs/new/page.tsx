@@ -192,7 +192,8 @@ export default function TrainingForm() {
     e.preventDefault();
     const process = jobConfig.config.process[0];
     const characterTrainingEnabled = process.train.diff_output_preservation
-      && process.train.diff_output_preservation_mode === 'character';
+      && process.train.diff_output_preservation_mode === 'character'
+      && process.train.character_training != null;
     if (characterTrainingEnabled) {
       if (datasetStatsStatus !== 'success') {
         alert('Wait for the character dataset inventory to finish before creating this job.');
@@ -288,7 +289,7 @@ export default function TrainingForm() {
         <div className="flex-shrink-0">
           <Button
             className="text-white bg-green-600 hover:bg-green-700 px-2 sm:px-3 py-1 rounded-md text-xs sm:text-base"
-            onClick={() => saveJob()}
+            onClick={event => void handleSubmit(event)}
             disabled={status === 'saving'}
           >
             {status === 'saving' ? (

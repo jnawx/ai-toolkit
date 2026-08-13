@@ -3,6 +3,7 @@ export type CharacterMediaCoverage = { sources: number; solo: number; group: num
 export type CharacterIdentityCoverage = {
   id: string;
   images: CharacterMediaCoverage;
+  videos: CharacterMediaCoverage;
   videosVisual: CharacterMediaCoverage;
   videosAudio: CharacterMediaCoverage;
   audio: CharacterMediaCoverage;
@@ -52,9 +53,7 @@ const relevantCoverage = (dataset: DatasetSelection, identity: CharacterIdentity
   const video = Boolean(dataset.auto_frame_count) || Number(dataset.num_frames ?? 1) > 1;
   if (audioOnly) return [identity.audio, identity.videosAudio];
   if (video) {
-    return dataset.do_audio
-      ? [identity.images, identity.videosVisual, identity.videosAudio]
-      : [identity.images, identity.videosVisual];
+    return [identity.images, dataset.do_audio ? identity.videos : identity.videosVisual];
   }
   return [identity.images];
 };
@@ -97,8 +96,7 @@ export function validateCharacterTrainingCoverage(
       const video = Boolean(dataset.auto_frame_count) || Number(dataset.num_frames ?? 1) > 1;
       if (audioOnly) modalityCoverage.audio.push(identity.audio, identity.videosAudio);
       else if (video) {
-        modalityCoverage.video.push(identity.videosVisual);
-        if (dataset.do_audio) modalityCoverage.audio.push(identity.videosAudio);
+        modalityCoverage.video.push(dataset.do_audio ? identity.videos : identity.videosVisual);
         modalityCoverage.image.push(identity.images);
       } else modalityCoverage.image.push(identity.images);
     }

@@ -1182,6 +1182,7 @@ def track_character_visual_mask(
     ],
     initial_mask_data_urls: Sequence[str] = (),
     initial_time_seconds: Optional[float] = None,
+    preserve_existing: bool = False,
     progress: Callable[[str], None] = lambda _message: None,
 ) -> dict:
     _require_character_identity(dataset_dir, identity_id, datasets_root)
@@ -1190,6 +1191,8 @@ def track_character_visual_mask(
         media_path=media_path,
         identity_id=identity_id,
     )
+    if preserve_existing and paths.visual.exists():
+        raise FileExistsError("this identity already has a visual mask for the media")
     initial_mask = (
         _combine_mask_data_urls(initial_mask_data_urls)
         if initial_mask_data_urls
@@ -1233,6 +1236,8 @@ def track_character_visual_mask(
             media_path=media_path,
             identity_id=identity_id,
         )
+        if preserve_existing and paths.visual.exists():
+            raise FileExistsError("this identity already has a visual mask for the media")
         _write_character_visual_mask_file(paths, binary_mask)
         _write_json(paths.prompts, {"prompts": validated_prompts})
         invalidate_character_annotation_latents(media_path)

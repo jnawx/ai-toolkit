@@ -6,8 +6,10 @@ from toolkit.character_training_sampler import (
     CharacterTrainingCandidate,
     CoverageWeightedSampler,
     build_character_sampling_plan,
+    recommended_character_epoch_size,
 )
-from toolkit.data_loader import build_character_training_sampler
+from toolkit.config_modules import DatasetConfig
+from toolkit.data_loader import build_character_training_sampler, get_dataloader_from_datasets
 
 
 class CharacterTrainingSamplerTests(unittest.TestCase):
@@ -216,6 +218,22 @@ class CharacterTrainingSamplerTests(unittest.TestCase):
         self.assertEqual(set(indices[:3]), {0, 1, 2})
         self.assertGreater(indices.count(0), indices.count(2))
 
+    def test_automatic_epoch_size_realizes_uneven_source_and_context_weights(self):
+        probabilities = [0.16] * 5 + [0.2]
+        sampler = CoverageWeightedSampler(
+            probabilities=probabilities,
+            epoch_size=recommended_character_epoch_size(probabilities),
+            seed=123,
+        )
+
+        indices = list(iter(sampler))
+        source_a = sum(index < 5 for index in indices)
+        source_b = len(indices) - source_a
+
+        self.assertEqual(len(indices), 50)
+        self.assertAlmostEqual(source_a / len(indices), 0.8, delta=0.02)
+        self.assertAlmostEqual(source_b / len(indices), 0.2, delta=0.02)
+
     def test_dataloader_builds_sampler_from_expanded_views_and_strictly_validates_each_identity(self):
         strategy = {
             "identities": [
@@ -256,11 +274,55 @@ class CharacterTrainingSamplerTests(unittest.TestCase):
         sampler = build_character_training_sampler(concat, seed=7)
 
         self.assertIsNotNone(sampler)
-        self.assertEqual(len(sampler), 4)
+        self.assertEqual(len(sampler), 32)
+        emitted = list(sampler)
+        self.assertAlmostEqual(emitted.count(0) / len(emitted), 0.75, delta=0.04)
+        self.assertAlmostEqual(emitted.count(1) / len(emitted), 0.25, delta=0.04)
 
         dataset.file_list = [dataset.file_list[0]]
         with self.assertRaisesRegex(ValueError, "bob"):
             build_character_training_sampler(concat, seed=7)
+
+    @patch("toolkit.data_loader.AiToolkitDataset")
+    def test_dataloader_skips_an_empty_unselected_dataset_pool(self, dataset_type):
+        strategy = {
+            "identities": [{"id": "alice", "weight": 1}],
+            "joint_training_fraction": 0,
+        }
+        configs = [
+            DatasetConfig(folder_path="/datasets/alice", resolution=[512], buckets=False, character_training=strategy),
+            DatasetConfig(folder_path="/datasets/unrelated", resolution=[512], buckets=False, character_training=strategy),
+        ]
+
+        def build_dataset(config, **_kwargs):
+            item = type(
+                "Item",
+                (),
+                {
+                    "path": "/alice.jpg",
+                    "character_dop_identity_id": "alice",
+                    "character_training_identity_ids": ("alice",),
+                    "character_training_view_mode": "focus",
+                    "is_video": False,
+                    "is_audio_only": False,
+                    "dataset_config": config,
+                },
+            )()
+            return type(
+                "Dataset",
+                (),
+                {
+                    "dataset_config": config,
+                    "file_list": [] if config.folder_path.endswith("unrelated") else [item],
+                    "__len__": lambda self: len(self.file_list),
+                    "__getitem__": lambda self, index: self.file_list[index],
+                },
+            )()
+
+        dataset_type.side_effect = build_dataset
+        dataloader = get_dataloader_from_datasets(configs, batch_size=1, sd=object())
+
+        self.assertEqual(len(dataloader.dataset.datasets), 1)
 
 
 if __name__ == "__main__":

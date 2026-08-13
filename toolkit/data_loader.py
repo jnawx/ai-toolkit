@@ -24,6 +24,7 @@ from toolkit.character_training_sampler import (
     CharacterTrainingCandidate,
     CoverageWeightedSampler,
     build_character_sampling_plan,
+    recommended_character_epoch_size,
 )
 from toolkit.config_modules import DatasetConfig, preprocess_dataset_raw_config
 from toolkit.dataloader_mixins import CaptionMixin, BucketsMixin, LatentCachingMixin, Augments, CLIPCachingMixin, ControlCachingMixin, TextEmbeddingCachingMixin
@@ -61,15 +62,29 @@ def expand_character_identity_file_items(file_items):
                 if isinstance(identity, dict) and str(identity.get("id", "")).strip()
             ]
             selected_id_set = set(selected_ids)
+            def view_is_usable(view):
+                if file_item.is_audio_only:
+                    return view.audio_intervals is not None
+                if file_item.is_video:
+                    return (
+                        view.visual_path is not None
+                        or (
+                            bool(getattr(file_item.dataset_config, "do_audio", False))
+                            and view.audio_intervals is not None
+                        )
+                    )
+                return view.visual_path is not None
+
+            usable_views = [view for view in identity_views if view_is_usable(view)]
             selected_views = [
-                view for view in identity_views if view.identity_id in selected_id_set
+                view for view in usable_views if view.identity_id in selected_id_set
             ]
             # A selected-identity job deliberately treats each configured dataset
             # as a media pool. Sources without a selected annotation never become
             # training or cache-preparation items.
             if not selected_views:
                 continue
-            all_identity_ids = tuple(view.identity_id for view in identity_views)
+            all_identity_ids = tuple(view.identity_id for view in usable_views)
 
             def append_view(identity_view, view_mode):
                 identity_item = copy.deepcopy(file_item)
@@ -78,7 +93,7 @@ def expand_character_identity_file_items(file_items):
                 )
                 replacements = {
                     view.trigger_word: view.caption_description
-                    for view in identity_views
+                    for view in usable_views
                     if view.identity_id not in retained_ids
                 }
                 additional_triggers = [
@@ -172,9 +187,8 @@ def build_character_training_sampler(concatenated_dataset, *, seed=0):
             )
     plan = build_character_sampling_plan(candidates, strategy)
     epoch_size = max(
-        len(candidates),
         int(strategy.get("epoch_size", 0) or 0),
-        len(candidates) * max(1, len(strategy.get("identities", []))),
+        recommended_character_epoch_size(plan.probabilities),
     )
     return CoverageWeightedSampler(plan.probabilities, epoch_size, seed=seed)
 
@@ -730,6 +744,15 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         # save the size database
         with open(dataset_size_file, 'w') as f:
             json.dump(self.size_database, f)
+
+        allow_empty_character_pool = bool(
+            self.dataset_config.character_training and not self.dataset_config.is_reg
+        )
+        if not self.file_list and allow_empty_character_pool:
+            print_acc(
+                f"  -  Skipping {self.dataset_path}: no selected character annotations"
+            )
+            return
         
         if self.is_audio_only:
             print_acc(
@@ -883,6 +906,8 @@ def get_dataloader_from_datasets(
 
         if config.type == 'image':
             dataset = AiToolkitDataset(config, batch_size=batch_size, sd=sd)
+            if len(dataset) == 0:
+                continue
             datasets.append(dataset)
             if config.buckets:
                 has_buckets = True
@@ -890,6 +915,14 @@ def get_dataloader_from_datasets(
                 is_caching_latents = True
         else:
             raise ValueError(f"invalid dataset type: {config.type}")
+
+    if not datasets:
+        if any(config.character_training for config in dataset_config_list):
+            raise ValueError(
+                "selected character identities have no eligible representation "
+                "in the configured training datasets"
+            )
+        return None
 
     concatenated_dataset = ConcatDataset(datasets)
     character_sampler = build_character_training_sampler(concatenated_dataset)

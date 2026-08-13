@@ -93,6 +93,21 @@ class CoverageWeightedSampler(Sampler[int]):
         return iter(coverage + repeats)
 
 
+def recommended_character_epoch_size(
+    probabilities: Sequence[float],
+    *,
+    minimum_expected_count: int = 8,
+) -> int:
+    """Size a cycle so mandatory coverage does not erase target weights."""
+    positive = [float(value) for value in probabilities if float(value) > 0.0]
+    if not positive:
+        raise ValueError("character sampling plan has no eligible views")
+    return max(
+        len(positive),
+        math.ceil(max(1, int(minimum_expected_count)) / min(positive)),
+    )
+
+
 def _identity_weights(raw_strategy: dict[str, Any]) -> dict[str, float]:
     identities = raw_strategy.get("identities", [])
     if not isinstance(identities, list) or not identities:

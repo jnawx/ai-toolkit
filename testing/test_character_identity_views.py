@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from PIL import Image
@@ -15,6 +16,38 @@ from toolkit.data_transfer_object.data_loader import FileItemDTO
 
 
 class CharacterIdentityTrainingViewTests(unittest.TestCase):
+    def test_video_views_only_use_annotations_for_enabled_modalities(self):
+        class Source:
+            def __init__(self, *, do_audio):
+                self.is_audio_only = False
+                self.is_video = True
+                self.is_reg = False
+                self.dataset_config = SimpleNamespace(
+                    do_audio=do_audio,
+                    character_training={
+                        "identities": [{"id": "alice", "weight": 1}],
+                        "joint_training_fraction": 0,
+                    },
+                )
+                self.character_dop_identity_views = [
+                    SimpleNamespace(
+                        identity_id="alice",
+                        trigger_word="AliceToken",
+                        caption_description="Alice description",
+                        visual_path=None,
+                        audio_intervals=[(0.0, 1.0)],
+                    )
+                ]
+
+            def bind_character_dop_identity(self, identity_view, **kwargs):
+                self.character_dop_identity_id = identity_view.identity_id
+                self.character_training_view_mode = kwargs["view_mode"]
+
+        self.assertEqual(expand_character_identity_file_items([Source(do_audio=False)]), [])
+        views = expand_character_identity_file_items([Source(do_audio=True)])
+        self.assertEqual(len(views), 1)
+        self.assertEqual(views[0].character_dop_identity_id, "alice")
+
     def test_selected_identities_create_isolated_focus_and_joint_caption_views(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_dir = Path(tmp_dir)

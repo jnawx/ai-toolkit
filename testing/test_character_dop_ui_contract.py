@@ -144,6 +144,44 @@ class CharacterDOPUIContractTests(unittest.TestCase):
         self.assertIn("storedIdentityId === CHARACTER_DOP_LEGACY_IDENTITY", source)
         self.assertIn("if (!cancelled) setPreview(data.data_url)", source)
 
+    def test_character_curriculum_is_cleared_when_character_dop_is_disabled(self):
+        source = (
+            Path(__file__).parents[1] / "ui" / "src" / "app" / "jobs" / "new" / "SimpleJob.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("if (!value)", source)
+        self.assertIn("'config.process[0].train.character_training'", source)
+        self.assertIn("setJobConfig(\n                                    undefined,", source)
+
+    def test_create_button_runs_selected_identity_coverage_validation(self):
+        source = (
+            Path(__file__).parents[1] / "ui" / "src" / "app" / "jobs" / "new" / "page.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("&& process.train.character_training != null", source)
+        self.assertIn("onClick={event => void handleSubmit(event)}", source)
+
+    def test_safe_batch_automask_refuses_to_overwrite_existing_masks(self):
+        annotator = (
+            Path(__file__).parents[1] / "ui" / "src" / "components" / "CharacterDOPAnnotator.tsx"
+        ).read_text(encoding="utf-8")
+        route = (
+            Path(__file__).parents[1] / "ui" / "src" / "app" / "api" / "datasets" / "characterDop" / "route.ts"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("preserveExisting: true", annotator)
+        self.assertIn("preserve_existing: Boolean(body.preserveExisting)", route)
+
+    def test_identity_manager_reports_partial_cleanup_and_has_a_lan_safe_id_fallback(self):
+        source = (
+            Path(__file__).parents[1] / "ui" / "src" / "components" / "CharacterIdentityManager.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("globalThis.crypto?.randomUUID", source)
+        self.assertIn("Math.random().toString(36)", source)
+        self.assertIn("result.cleanup_pending", source)
+        self.assertIn("result.cleanup_errors.join", source)
+
 
 if __name__ == "__main__":
     unittest.main()

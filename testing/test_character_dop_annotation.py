@@ -947,6 +947,44 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
             self.assertEqual(received[0][3], 1.25)
             self.assertTrue(state["visual"]["exists"])
 
+    def test_safe_automask_refuses_to_overwrite_an_existing_identity_mask(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "person.jpg"
+            media_path.touch()
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a woman",
+            )
+            save_character_visual_mask(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="alice",
+                mask=np.ones((4, 4), dtype=np.uint8),
+            )
+            tracker_called = False
+
+            def tracker(*_args):
+                nonlocal tracker_called
+                tracker_called = True
+                return np.zeros((1, 4, 4), dtype=np.uint8)
+
+            with self.assertRaisesRegex(FileExistsError, "already has a visual mask"):
+                track_character_visual_mask(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id="alice",
+                    prompts=[{"time_seconds": 0, "points": [{"x": 0.5, "y": 0.5, "label": 1}]}],
+                    tracker=tracker,
+                    preserve_existing=True,
+                )
+
+            self.assertFalse(tracker_called)
+
     def test_training_finds_a_nested_visual_annotation_created_by_the_ui(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_dir = Path(tmp_dir) / "dataset"

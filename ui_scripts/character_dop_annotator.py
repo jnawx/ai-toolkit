@@ -260,6 +260,7 @@ def main() -> None:
             prompts=prompts or [],
             initial_mask_data_urls=initial_masks,
             initial_time_seconds=payload.get("initial_time_seconds"),
+            preserve_existing=bool(payload.get("preserve_existing", False)),
             tracker=lambda path, prompts, initial_mask, initial_time, progress: track_with_sam2(
                 path,
                 prompts,

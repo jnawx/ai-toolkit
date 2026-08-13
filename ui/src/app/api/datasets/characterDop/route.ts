@@ -252,6 +252,7 @@ export async function POST(request: Request) {
       initial_masks: body.initialMasks ?? [],
       initial_time_seconds: body.initialTimeSeconds,
       model_id: body.modelId,
+      preserve_existing: Boolean(body.preserveExisting),
     };
   } else if (body.action === 'preview') {
     args.push('--frame-index', String(body.frameIndex ?? 0));

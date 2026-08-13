@@ -1078,7 +1078,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         )
 
                     # make sure trigger is in the prompts if not a regularization run
-                    if self.trigger_word is not None:
+                    if (
+                        self.trigger_word is not None
+                        and self.train_config.character_training is None
+                    ):
                         prompt = self.sd.inject_trigger_into_prompt(
                             prompt,
                             trigger=self.trigger_word,

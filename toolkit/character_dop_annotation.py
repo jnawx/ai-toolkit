@@ -36,6 +36,7 @@ CHARACTER_IDENTITY_TEXT_LIMITS = {
     "display name": (128, 512),
     "trigger word": (128, 512),
     "class prompt": (256, 1024),
+    "caption description": (1024, 4096),
 }
 
 
@@ -142,6 +143,9 @@ def _list_character_identities_at_path(catalog_path: Path) -> list[dict]:
     for raw_identity in raw_identities:
         if not isinstance(raw_identity, dict):
             raise ValueError("each character identity must be an object")
+        class_prompt = _required_identity_text(
+            raw_identity.get("class_prompt", ""), "class prompt"
+        )
         identity = {
             "id": _validate_identity_id(raw_identity.get("id", "")),
             "display_name": _required_identity_text(
@@ -150,8 +154,10 @@ def _list_character_identities_at_path(catalog_path: Path) -> list[dict]:
             "trigger_word": _required_identity_text(
                 raw_identity.get("trigger_word", ""), "trigger word"
             ),
-            "class_prompt": _required_identity_text(
-                raw_identity.get("class_prompt", ""), "class prompt"
+            "class_prompt": class_prompt,
+            "caption_description": _required_identity_text(
+                raw_identity.get("caption_description", class_prompt),
+                "caption description",
             ),
         }
         if identity["id"] in seen_ids:
@@ -242,13 +248,23 @@ def _identity_conflict(identities: Sequence[dict], identity: dict) -> Optional[s
 
 
 def _validated_identity(
-    *, identity_id: str, display_name: str, trigger_word: str, class_prompt: str
+    *,
+    identity_id: str,
+    display_name: str,
+    trigger_word: str,
+    class_prompt: str,
+    caption_description: Optional[str] = None,
 ) -> dict:
+    validated_class_prompt = _required_identity_text(class_prompt, "class prompt")
     return {
         "id": _validate_identity_id(identity_id),
         "display_name": _required_identity_text(display_name, "display name"),
         "trigger_word": _required_identity_text(trigger_word, "trigger word"),
-        "class_prompt": _required_identity_text(class_prompt, "class prompt"),
+        "class_prompt": validated_class_prompt,
+        "caption_description": _required_identity_text(
+            caption_description if caption_description is not None else validated_class_prompt,
+            "caption description",
+        ),
     }
 
 
@@ -305,6 +321,7 @@ def _save_character_identity(
     display_name: str,
     trigger_word: str,
     class_prompt: str,
+    caption_description: Optional[str],
     require_existing: Optional[bool],
 ) -> dict:
     identity = _validated_identity(
@@ -312,6 +329,7 @@ def _save_character_identity(
         display_name=display_name,
         trigger_word=trigger_word,
         class_prompt=class_prompt,
+        caption_description=caption_description,
     )
     return _save_identity_catalog_entry(
         catalog_path=_identity_catalog_path(dataset_dir),
@@ -379,6 +397,7 @@ def create_shared_character_identity(
     display_name: str,
     trigger_word: str,
     class_prompt: str,
+    caption_description: Optional[str] = None,
 ) -> dict:
     list_available_character_identities(datasets_root)
     return _save_identity_catalog_entry(
@@ -389,6 +408,7 @@ def create_shared_character_identity(
             display_name=display_name,
             trigger_word=trigger_word,
             class_prompt=class_prompt,
+            caption_description=caption_description,
         ),
         require_existing=False,
     )
@@ -401,6 +421,7 @@ def update_shared_character_identity(
     display_name: str,
     trigger_word: str,
     class_prompt: str,
+    caption_description: Optional[str] = None,
 ) -> dict:
     list_available_character_identities(datasets_root)
     return _save_identity_catalog_entry(
@@ -411,6 +432,7 @@ def update_shared_character_identity(
             display_name=display_name,
             trigger_word=trigger_word,
             class_prompt=class_prompt,
+            caption_description=caption_description,
         ),
         require_existing=True,
     )
@@ -423,6 +445,7 @@ def save_character_identity(
     display_name: str,
     trigger_word: str,
     class_prompt: str,
+    caption_description: Optional[str] = None,
 ) -> dict:
     """Create a new named identity and reject an existing immutable id."""
     return _save_character_identity(
@@ -431,6 +454,7 @@ def save_character_identity(
         display_name=display_name,
         trigger_word=trigger_word,
         class_prompt=class_prompt,
+        caption_description=caption_description,
         require_existing=False,
     )
 
@@ -442,6 +466,7 @@ def create_character_identity(
     display_name: str,
     trigger_word: str,
     class_prompt: str,
+    caption_description: Optional[str] = None,
 ) -> dict:
     """Create a new named identity and reject an existing immutable id."""
     return _save_character_identity(
@@ -450,6 +475,7 @@ def create_character_identity(
         display_name=display_name,
         trigger_word=trigger_word,
         class_prompt=class_prompt,
+        caption_description=caption_description,
         require_existing=False,
     )
 
@@ -461,6 +487,7 @@ def update_character_identity(
     display_name: str,
     trigger_word: str,
     class_prompt: str,
+    caption_description: Optional[str] = None,
 ) -> dict:
     """Update metadata for an existing identity without recreating stale ids."""
     return _save_character_identity(
@@ -469,6 +496,7 @@ def update_character_identity(
         display_name=display_name,
         trigger_word=trigger_word,
         class_prompt=class_prompt,
+        caption_description=caption_description,
         require_existing=True,
     )
 
@@ -667,6 +695,7 @@ class CharacterAnnotationPaths:
     visual: Path
     audio: Path
     prompts: Path
+    caption_description: Path
 
 
 @dataclass(frozen=True)
@@ -677,6 +706,7 @@ class CharacterIdentityView:
     display_name: str
     trigger_word: str
     class_prompt: str
+    caption_description: str
     visual_path: Optional[Path]
     audio_intervals: Optional[list[tuple[float, float]]]
 
@@ -718,6 +748,12 @@ def get_character_annotation_paths(
         prompts=_annotation_storage_path(
             dataset_dir, *root_parts, "prompts", _append_suffix(relative_stem, ".json")
         ),
+        caption_description=_annotation_storage_path(
+            dataset_dir,
+            *root_parts,
+            "descriptions",
+            _append_suffix(relative_stem, ".json"),
+        ),
     )
 
 
@@ -747,12 +783,24 @@ def get_character_identity_views(
         visual_path = paths.visual if paths.visual.exists() else None
         if visual_path is None and audio_intervals is None:
             continue
+        caption_description = identity["caption_description"]
+        if paths.caption_description.exists():
+            payload = json.loads(paths.caption_description.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or "caption_description" not in payload:
+                raise ValueError(
+                    "Character caption description sidecar must contain "
+                    f"'caption_description': {paths.caption_description}"
+                )
+            caption_description = _required_identity_text(
+                payload["caption_description"], "caption description"
+            )
         views.append(
             CharacterIdentityView(
                 identity_id=identity["id"],
                 display_name=identity["display_name"],
                 trigger_word=identity["trigger_word"],
                 class_prompt=identity["class_prompt"],
+                caption_description=caption_description,
                 visual_path=visual_path,
                 audio_intervals=audio_intervals,
             )
@@ -860,6 +908,7 @@ def detect_character_instances(
     model_id: str,
     detector: Callable[[Path, float, str, str, Callable[[str], None]], list[dict]],
     progress: Callable[[str], None] = lambda _message: None,
+    datasets_root: Optional[Path] = None,
 ) -> dict:
     """Detect selectable instances of a text concept on one source frame."""
     _resolved_media(dataset_dir, media_path)
@@ -875,6 +924,12 @@ def detect_character_instances(
     detections = detector(media_path, time_seconds, concept, model_id, progress)
     candidates = []
     expected_shape = None
+    identities = (
+        list_available_character_identities(datasets_root)
+        if datasets_root is not None
+        else list_character_identities(dataset_dir)
+    )
+    existing_frames: dict[str, Optional[np.ndarray]] = {}
     for index, detection in enumerate(detections[:MAX_AUTO_MASK_COUNT], start=1):
         mask = (np.asarray(detection["mask"]) > 0).astype(np.uint8)
         if mask.ndim != 2 or min(mask.shape) < 1:
@@ -905,6 +960,54 @@ def detect_character_instances(
         score = float(detection.get("score", 0.0))
         if not np.isfinite(score):
             raise ValueError("character detector scores must be finite")
+        existing_identity_id = None
+        for identity in identities:
+            if identity["id"] not in existing_frames:
+                paths = get_character_annotation_paths(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id=identity["id"],
+                )
+                if not paths.visual.exists():
+                    existing_frames[identity["id"]] = None
+                    continue
+                saved = _load_character_visual_mask(paths)
+                saved_frame_index = 0
+                if saved.shape[0] > 1 and media_path.suffix.lower() not in VISUAL_MASK_EXTENSIONS:
+                    try:
+                        import av
+
+                        with av.open(str(media_path)) as container:
+                            stream = container.streams.video[0]
+                            duration = (
+                                float(stream.duration * stream.time_base)
+                                if stream.duration is not None and stream.time_base is not None
+                                else float(container.duration or 0) / 1_000_000.0
+                            )
+                        if duration > 0:
+                            saved_frame_index = round(
+                                min(1.0, time_seconds / duration) * (saved.shape[0] - 1)
+                            )
+                    except (ImportError, OSError, ValueError, IndexError):
+                        saved_frame_index = min(saved.shape[0] - 1, round(time_seconds * 24.0))
+                saved_frame = (np.asarray(saved[saved_frame_index]) > 0).astype(np.uint8)
+                if saved_frame.shape != mask.shape:
+                    saved_frame = (
+                        np.asarray(
+                            Image.fromarray(saved_frame * 255).resize(
+                                (mask.shape[1], mask.shape[0]), Image.Resampling.NEAREST
+                            )
+                        ) > 0
+                    ).astype(np.uint8)
+                existing_frames[identity["id"]] = saved_frame
+            saved_frame = existing_frames[identity["id"]]
+            if saved_frame is None:
+                continue
+            intersection = int(np.logical_and(saved_frame, mask).sum())
+            smaller_area = min(int(saved_frame.sum()), int(mask.sum()))
+            if smaller_area > 0 and intersection / smaller_area >= 0.5:
+                existing_identity_id = identity["id"]
+                break
         candidates.append(
             {
                 "id": index,
@@ -912,6 +1015,7 @@ def detect_character_instances(
                 "box": box,
                 "area": int(mask.sum()),
                 "mask_data_url": _mask_data_url(mask),
+                "existing_identity_id": existing_identity_id,
             }
         )
     return {
@@ -965,6 +1069,36 @@ def save_character_audio_intervals(
         )
         invalidate_character_annotation_latents(media_path)
     return paths.audio
+
+
+def save_character_caption_description(
+    *,
+    dataset_dir: Path,
+    media_path: Path,
+    caption_description: Optional[str],
+    identity_id: str,
+    datasets_root: Optional[Path] = None,
+) -> Optional[Path]:
+    """Save or clear one media-specific identity description override."""
+    with _character_identity_annotation_lock(dataset_dir, identity_id, datasets_root):
+        identity = _require_character_identity(
+            dataset_dir,
+            identity_id,
+            datasets_root,
+            shared_catalog_locked=datasets_root is not None,
+        )
+        _activate_character_identity_unlocked(dataset_dir, identity)
+        paths = get_character_annotation_paths(
+            dataset_dir=dataset_dir,
+            media_path=media_path,
+            identity_id=identity_id,
+        )
+        if caption_description is None or not str(caption_description).strip():
+            paths.caption_description.unlink(missing_ok=True)
+            return None
+        value = _required_identity_text(caption_description, "caption description")
+        _write_json(paths.caption_description, {"caption_description": value})
+        return paths.caption_description
 
 
 def _write_character_visual_mask_file(paths: CharacterAnnotationPaths, binary_mask: np.ndarray) -> None:
@@ -1110,6 +1244,27 @@ def track_character_visual_mask(
     )
 
 
+def _load_character_visual_mask(paths: CharacterAnnotationPaths) -> np.ndarray:
+    if not paths.visual.exists():
+        raise FileNotFoundError("character visual mask has not been generated")
+    if paths.visual.suffix == ".png":
+        with Image.open(paths.visual) as image:
+            return (np.asarray(image.convert("L")) > 0).astype(np.uint8)[None]
+    mask = np.load(paths.visual, mmap_mode="r", allow_pickle=False)
+    if mask.ndim != 3:
+        raise ValueError("saved character visual mask must have shape THW")
+    return mask
+
+
+def _mask_frame_data_url(frame: np.ndarray) -> str:
+    buffer = io.BytesIO()
+    Image.fromarray((np.asarray(frame) > 0).astype(np.uint8) * 255, mode="L").save(
+        buffer, format="PNG", optimize=True
+    )
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
 def get_character_mask_preview(
     *,
     dataset_dir: Path,
@@ -1124,22 +1279,10 @@ def get_character_mask_preview(
         media_path=media_path,
         identity_id=identity_id,
     )
-    if not paths.visual.exists():
-        raise FileNotFoundError("character visual mask has not been generated")
-    if paths.visual.suffix == ".png":
-        with Image.open(paths.visual) as image:
-            mask = (np.asarray(image.convert("L")) > 0).astype(np.uint8)[None]
-    else:
-        mask = np.load(paths.visual, mmap_mode="r", allow_pickle=False)
-        if mask.ndim != 3:
-            raise ValueError("saved character visual mask must have shape THW")
+    mask = _load_character_visual_mask(paths)
     frame_index = max(0, min(int(frame_index), mask.shape[0] - 1))
-    frame = (np.asarray(mask[frame_index]) > 0).astype(np.uint8) * 255
-    buffer = io.BytesIO()
-    Image.fromarray(frame, mode="L").save(buffer, format="PNG", optimize=True)
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return {
-        "data_url": f"data:image/png;base64,{encoded}",
+        "data_url": _mask_frame_data_url(mask[frame_index]),
         "frame_index": frame_index,
         "frame_count": int(mask.shape[0]),
         "width": int(mask.shape[2]),
@@ -1169,6 +1312,17 @@ def get_character_annotation_state(
     if paths.prompts.exists():
         payload = json.loads(paths.prompts.read_text(encoding="utf-8"))
         prompts = payload.get("prompts", [])
+    caption_description_override = None
+    if paths.caption_description.exists():
+        payload = json.loads(paths.caption_description.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or "caption_description" not in payload:
+            raise ValueError(
+                "Character caption description sidecar must contain "
+                f"'caption_description': {paths.caption_description}"
+            )
+        caption_description_override = _required_identity_text(
+            payload["caption_description"], "caption description"
+        )
     visual_shape = None
     if paths.visual.exists():
         if paths.visual.suffix == ".png":
@@ -1195,4 +1349,58 @@ def get_character_annotation_state(
             "intervals": intervals,
         },
         "prompts": prompts,
+        "caption_description_override": caption_description_override,
     }
+
+
+def get_character_mask_overlays(
+    *,
+    dataset_dir: Path,
+    media_path: Path,
+    time_fraction: float = 0.0,
+    datasets_root: Optional[Path] = None,
+) -> list[dict]:
+    """Return every saved identity mask at the same relative media time."""
+    try:
+        fraction = float(time_fraction)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("character overlay time fraction must be between 0 and 1") from exc
+    if not np.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
+        raise ValueError("character overlay time fraction must be between 0 and 1")
+    identities = (
+        list_available_character_identities(datasets_root)
+        if datasets_root is not None
+        else list_character_identities(dataset_dir)
+    )
+    overlays = []
+    for identity in identities:
+        paths = get_character_annotation_paths(
+            dataset_dir=dataset_dir,
+            media_path=media_path,
+            identity_id=identity["id"],
+        )
+        if not paths.visual.exists():
+            continue
+        mask = _load_character_visual_mask(paths)
+        frame_index = min(mask.shape[0] - 1, max(0, round(fraction * (mask.shape[0] - 1))))
+        frame = np.asarray(mask[frame_index]) > 0
+        y_values, x_values = np.nonzero(frame)
+        if len(x_values):
+            centroid = [
+                float(x_values.mean() / max(1, frame.shape[1] - 1)),
+                float(y_values.mean() / max(1, frame.shape[0] - 1)),
+            ]
+        else:
+            centroid = [0.5, 0.5]
+        overlays.append({
+            "identity_id": identity["id"],
+            "display_name": identity["display_name"],
+            "trigger_word": identity["trigger_word"],
+            "data_url": _mask_frame_data_url(frame),
+            "centroid": centroid,
+            "frame_index": int(frame_index),
+            "frame_count": int(mask.shape[0]),
+            "width": int(mask.shape[2]),
+            "height": int(mask.shape[1]),
+        })
+    return overlays

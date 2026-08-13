@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -58,12 +59,14 @@ def detect_with_sam3(
 
     progress(f"Loading {model_id} on {device.type}")
     try:
-        model = Sam3Model.from_pretrained(model_id, dtype=dtype).to(device).eval()
-        processor = Sam3Processor.from_pretrained(model_id)
-    except OSError as exc:
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+        model = Sam3Model.from_pretrained(model_id, dtype=dtype, token=token).to(device).eval()
+        processor = Sam3Processor.from_pretrained(model_id, token=token)
+    except (OSError, ValueError, ImportError) as exc:
         raise RuntimeError(
-            "SAM 3 could not be downloaded. Accept access to facebook/sam3 on "
-            "Hugging Face and provide an authenticated HF token to the container."
+            f"SAM 3 ({model_id}) could not be loaded: {exc}. Verify that your saved "
+            "Hugging Face token can access the gated model and that the installed "
+            "transformers version includes SAM 3."
         ) from exc
 
     inputs = processor(images=image, text=concept, return_tensors="pt").to(device)

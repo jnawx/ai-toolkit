@@ -15,6 +15,107 @@ from toolkit.data_transfer_object.data_loader import FileItemDTO
 
 
 class CharacterIdentityTrainingViewTests(unittest.TestCase):
+    def test_selected_identities_create_isolated_focus_and_joint_caption_views(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir)
+            media_path = dataset_dir / "group.jpg"
+            Image.new("RGB", (8, 6)).save(media_path)
+            media_path.with_suffix(".txt").write_text(
+                "AliceToken stands beside BobToken and CarlToken.",
+                encoding="utf-8",
+            )
+            for identity_id, trigger_word, description in (
+                ("alice", "AliceToken", "a tall woman with silver hair"),
+                ("bob", "BobToken", "a bearded man in a blue shirt"),
+                ("carl", "CarlToken", "an older man wearing glasses"),
+            ):
+                save_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id=identity_id,
+                    display_name=identity_id.title(),
+                    trigger_word=trigger_word,
+                    class_prompt="a person",
+                    caption_description=description,
+                )
+                save_character_visual_mask(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id=identity_id,
+                    mask=np.ones((6, 8), dtype=np.uint8),
+                )
+            dataset_config = DatasetConfig(
+                folder_path=str(dataset_dir),
+                resolution=[8],
+                diff_output_preservation=True,
+                character_training={
+                    "identities": [
+                        {"id": "alice", "weight": 1},
+                        {"id": "bob", "weight": 1},
+                    ],
+                    "joint_training_fraction": 0.25,
+                },
+            )
+            source = FileItemDTO(
+                path=str(media_path),
+                dataset_config=dataset_config,
+                size_database={},
+                dataset_root=str(dataset_dir),
+            )
+
+            views = expand_character_identity_file_items([source])
+            for view in views:
+                view.load_caption()
+
+            self.assertEqual(
+                [(view.character_dop_identity_id, view.character_training_view_mode) for view in views],
+                [("alice", "focus"), ("bob", "focus"), ("alice", "joint"), ("bob", "joint")],
+            )
+            self.assertEqual(
+                [view.caption for view in views],
+                [
+                    "AliceToken stands beside a bearded man in a blue shirt and an older man wearing glasses.",
+                    "a tall woman with silver hair stands beside BobToken and an older man wearing glasses.",
+                    "AliceToken stands beside BobToken and an older man wearing glasses.",
+                    "AliceToken stands beside BobToken and an older man wearing glasses.",
+                ],
+            )
+
+    def test_selected_identity_job_discards_media_without_a_selected_annotation(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir)
+            media_path = dataset_dir / "carl.jpg"
+            Image.new("RGB", (8, 6)).save(media_path)
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="carl",
+                display_name="Carl",
+                trigger_word="CarlToken",
+                class_prompt="a man",
+            )
+            save_character_visual_mask(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="carl",
+                mask=np.ones((6, 8), dtype=np.uint8),
+            )
+            dataset_config = DatasetConfig(
+                folder_path=str(dataset_dir),
+                resolution=[8],
+                diff_output_preservation=True,
+                character_training={
+                    "identities": [{"id": "alice", "weight": 1}],
+                    "joint_training_fraction": 0,
+                },
+            )
+            source = FileItemDTO(
+                path=str(media_path),
+                dataset_config=dataset_config,
+                size_database={},
+                dataset_root=str(dataset_dir),
+            )
+
+            self.assertEqual(expand_character_identity_file_items([source]), [])
+
     def test_named_identity_catalog_is_a_valid_character_dop_trigger_source(self):
         from extensions_built_in.sd_trainer.SDTrainer import has_dop_trigger_source
 
@@ -243,6 +344,45 @@ class CharacterIdentityTrainingViewTests(unittest.TestCase):
                 [view.get_latent_info_dict()["character_dop_identity_id"] for view in views],
                 ["alice", "bob"],
             )
+
+    def test_focus_and_joint_views_use_distinct_video_latent_cache_keys(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir)
+            media_path = dataset_dir / "shared.jpg"
+            Image.new("RGB", (8, 6)).save(media_path)
+            for identity_id, trigger_word in (("alice", "AliceToken"), ("bob", "BobToken")):
+                save_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id=identity_id,
+                    display_name=identity_id.title(),
+                    trigger_word=trigger_word,
+                    class_prompt="a person",
+                )
+                save_character_visual_mask(
+                    dataset_dir=dataset_dir,
+                    media_path=media_path,
+                    identity_id=identity_id,
+                    mask=np.ones((6, 8), dtype=np.uint8),
+                )
+            dataset_config = DatasetConfig(
+                folder_path=str(dataset_dir),
+                resolution=[8],
+                diff_output_preservation=True,
+                character_training={
+                    "identities": [{"id": "alice", "weight": 1}, {"id": "bob", "weight": 1}],
+                    "joint_training_fraction": 0.5,
+                },
+            )
+            source = FileItemDTO(
+                path=str(media_path), dataset_config=dataset_config, size_database={}, dataset_root=str(dataset_dir)
+            )
+            views = expand_character_identity_file_items([source])
+
+            alice_views = [view for view in views if view.character_dop_identity_id == "alice"]
+            paths = [view.get_latent_path(recalculate=True) for view in alice_views]
+
+            self.assertEqual([view.character_training_view_mode for view in alice_views], ["focus", "joint"])
+            self.assertNotEqual(paths[0], paths[1])
 
 
 if __name__ == "__main__":

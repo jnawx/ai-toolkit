@@ -21,6 +21,7 @@ from toolkit.character_dop_annotation import (
     detect_character_instances,
     find_matching_character_visual_mask,
     get_character_mask_preview,
+    get_character_mask_overlays,
     get_character_annotation_paths,
     get_character_identity_views,
     is_character_annotation_artifact,
@@ -28,6 +29,7 @@ from toolkit.character_dop_annotation import (
     list_character_identities,
     list_available_character_identities,
     save_character_audio_intervals,
+    save_character_caption_description,
     save_character_identity,
     save_character_visual_mask,
     track_character_visual_mask,
@@ -37,6 +39,60 @@ from toolkit.character_dop_annotation import (
 
 
 class CharacterDOPAnnotationStorageTests(unittest.TestCase):
+    def test_identity_stores_a_rich_caption_description_separately_from_its_dop_class(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+
+            identity = save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a woman",
+                caption_description="a tall woman with a silver bob haircut and a red wool coat",
+            )
+
+            self.assertEqual(identity["class_prompt"], "a woman")
+            self.assertEqual(
+                identity["caption_description"],
+                "a tall woman with a silver bob haircut and a red wool coat",
+            )
+
+    def test_media_caption_description_overrides_the_global_identity_description(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "alice.jpg"
+            Image.new("RGB", (4, 4)).save(media_path)
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a woman",
+                caption_description="a woman with short silver hair",
+            )
+            save_character_visual_mask(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="alice",
+                mask=np.ones((4, 4), dtype=np.uint8),
+            )
+
+            save_character_caption_description(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="alice",
+                caption_description="a woman wearing a red raincoat",
+            )
+
+            view = get_character_identity_views(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+            )[0]
+            self.assertEqual(view.caption_description, "a woman wearing a red raincoat")
+
     def test_updating_identity_metadata_preserves_its_annotations(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_dir = Path(tmp_dir) / "dataset"
@@ -72,6 +128,7 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
                     "display_name": "Alice Example",
                     "trigger_word": "AliceToken",
                     "class_prompt": "a woman",
+                    "caption_description": "a woman",
                 },
             )
             self.assertTrue(mask_path.is_file())
@@ -626,6 +683,45 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
             self.assertEqual((result["width"], result["height"]), (768, 384))
             self.assertEqual(candidate["box"], [76.8, 38.4, 691.2, 345.6])
 
+    def test_auto_mask_marks_candidates_that_overlap_an_existing_identity_mask(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "people.jpg"
+            Image.new("RGB", (6, 4)).save(media_path)
+            save_character_identity(
+                dataset_dir=dataset_dir,
+                identity_id="alice",
+                display_name="Alice",
+                trigger_word="AliceToken",
+                class_prompt="a woman",
+            )
+            alice_mask = np.zeros((4, 6), dtype=np.uint8)
+            alice_mask[:, :3] = 1
+            save_character_visual_mask(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                identity_id="alice",
+                mask=alice_mask,
+            )
+            other_mask = np.zeros((4, 6), dtype=np.uint8)
+            other_mask[:, 3:] = 1
+
+            candidates = detect_character_instances(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                time_seconds=0,
+                concept="person",
+                model_id="facebook/sam3",
+                detector=lambda *_args: [
+                    {"mask": alice_mask, "score": 0.9, "box": [0, 0, 3, 4]},
+                    {"mask": other_mask, "score": 0.8, "box": [3, 0, 6, 4]},
+                ],
+            )["candidates"]
+
+            self.assertEqual(candidates[0]["existing_identity_id"], "alice")
+            self.assertIsNone(candidates[1]["existing_identity_id"])
+
     def test_user_can_save_and_reload_speaking_intervals_for_a_dataset_item(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_dir = Path(tmp_dir) / "dataset"
@@ -675,6 +771,37 @@ class CharacterDOPAnnotationStorageTests(unittest.TestCase):
             pixels = np.asarray(image)
             self.assertEqual(tuple(pixels.shape), (4, 5))
             self.assertEqual(int((pixels > 0).sum()), 4)
+
+    def test_all_identity_overlays_use_a_shared_relative_video_time(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_dir = Path(tmp_dir) / "dataset"
+            dataset_dir.mkdir()
+            media_path = dataset_dir / "scene.mp4"
+            media_path.touch()
+            for identity_id, trigger in (("alice", "AliceToken"), ("bob", "BobToken")):
+                save_character_identity(
+                    dataset_dir=dataset_dir,
+                    identity_id=identity_id,
+                    display_name=identity_id.title(),
+                    trigger_word=trigger,
+                    class_prompt="a person",
+                )
+            alice = np.zeros((3, 4, 4), dtype=np.uint8)
+            alice[2, 0, 0] = 1
+            bob = np.zeros((5, 4, 4), dtype=np.uint8)
+            bob[4, 3, 3] = 1
+            save_character_visual_mask(dataset_dir=dataset_dir, media_path=media_path, identity_id="alice", mask=alice)
+            save_character_visual_mask(dataset_dir=dataset_dir, media_path=media_path, identity_id="bob", mask=bob)
+
+            overlays = get_character_mask_overlays(
+                dataset_dir=dataset_dir,
+                media_path=media_path,
+                time_fraction=1.0,
+            )
+
+            self.assertEqual([overlay["identity_id"] for overlay in overlays], ["alice", "bob"])
+            self.assertEqual(overlays[0]["centroid"], [0.0, 0.0])
+            self.assertEqual(overlays[1]["centroid"], [1.0, 1.0])
 
     def test_image_tracking_saves_a_normal_png_mask_for_existing_image_dataloaders(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

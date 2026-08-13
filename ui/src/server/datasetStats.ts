@@ -8,15 +8,27 @@ type MediaInventory = {
 };
 
 type IdentityAssignments = {
+  id: string;
   visualImages: Set<string>;
   visualTemporal: Set<string>;
   audio: Set<string>;
   error?: string;
 };
 
+type IdentityMediaCoverage = { sources: number; solo: number; group: number };
+export type IdentityCoverage = {
+  id: string;
+  images: IdentityMediaCoverage;
+  videosVisual: IdentityMediaCoverage;
+  videosAudio: IdentityMediaCoverage;
+  audio: IdentityMediaCoverage;
+};
+
 export type DatasetInventory = {
   path: string;
   identityCount: number;
+  identities: IdentityCoverage[];
+  jointIdentityPairs: [string, string][];
   images: MediaInventory;
   videos: MediaInventory;
   audio: MediaInventory;
@@ -36,6 +48,7 @@ const IDENTITY_TEXT_LIMITS: Record<string, [number, number]> = {
   display_name: [128, 512],
   trigger_word: [128, 512],
   class_prompt: [256, 1024],
+  caption_description: [1024, 4096],
 };
 const MEDIA_EXTENSIONS = new Set([
   ...IMAGE_EXTENSIONS,
@@ -144,7 +157,11 @@ async function readIdentityIds(
         throw new Error('Character identity catalog contains an invalid identity id');
       }
       for (const [field, [maxCharacters, maxBytes]] of Object.entries(IDENTITY_TEXT_LIMITS)) {
-        const value = String(rawIdentity[field] ?? '').trim();
+        const value = String(
+          field === 'caption_description'
+            ? rawIdentity[field] ?? rawIdentity.class_prompt ?? ''
+            : rawIdentity[field] ?? '',
+        ).trim();
         if (!value) throw new Error(`Character identity ${field.replace('_', ' ')} cannot be blank`);
         if (Array.from(value).length > maxCharacters || Buffer.byteLength(value, 'utf8') > maxBytes) {
           throw new Error(`Character identity ${field.replace('_', ' ')} exceeds its size limit`);
@@ -205,6 +222,7 @@ async function annotatedStemsForIdentity(
   const visualFiles = await walkFiles(visualRoot, false, new Set(['.png', '.npy']), budget);
   const audioFiles = await walkFiles(audioRoot, false, new Set(['.json']), budget);
   const assignments: IdentityAssignments = {
+    id: identityId,
     visualImages: new Set(),
     visualTemporal: new Set(),
     audio: new Set(),
@@ -253,11 +271,20 @@ export async function collectDatasetInventory(
   const inventory: DatasetInventory = {
     path: resolvedDatasetPath,
     identityCount: activeIdentityIds.length,
+    identities: activeIdentityIds.map(id => ({
+      id,
+      images: { sources: 0, solo: 0, group: 0 },
+      videosVisual: { sources: 0, solo: 0, group: 0 },
+      videosAudio: { sources: 0, solo: 0, group: 0 },
+      audio: { sources: 0, solo: 0, group: 0 },
+    })),
+    jointIdentityPairs: [],
     images: emptyMediaInventory(),
     videos: emptyMediaInventory(),
     audio: emptyMediaInventory(),
     error: sharedCatalogError ?? catalog.error ?? identityAssignments.find(assignment => assignment.error)?.error,
   };
+  const jointPairKeys = new Set<string>();
 
   for (const sourcePath of sourceFiles) {
     const extension = path.extname(sourcePath).toLowerCase();
@@ -279,6 +306,41 @@ export async function collectDatasetInventory(
     }, 0);
     if (viewCount > 0) category.assignedSources += 1;
     category.characterViews += viewCount;
+
+    const sourceIdentities = identityAssignments.filter(assignment => {
+      const hasVisual = IMAGE_EXTENSIONS.has(extension)
+        ? assignment.visualImages.has(sourceStem)
+        : assignment.visualTemporal.has(sourceStem);
+      return hasVisual || assignment.audio.has(sourceStem);
+    });
+    const sourceIdentityCount = sourceIdentities.length;
+    for (let left = 0; left < sourceIdentities.length; left++) {
+      for (let right = left + 1; right < sourceIdentities.length; right++) {
+        const pair = [sourceIdentities[left].id, sourceIdentities[right].id].sort() as [string, string];
+        const pairKey = `${pair[0]}\0${pair[1]}`;
+        if (!jointPairKeys.has(pairKey)) {
+          jointPairKeys.add(pairKey);
+          inventory.jointIdentityPairs.push(pair);
+        }
+      }
+    }
+    const updateCoverage = (matching: IdentityAssignments[], field: keyof Omit<IdentityCoverage, 'id'>) => {
+      for (const assignment of matching) {
+        const coverage = inventory.identities.find(identity => identity.id === assignment.id)?.[field];
+        if (!coverage) continue;
+        coverage.sources += 1;
+        if (sourceIdentityCount > 1) coverage.group += 1;
+        else coverage.solo += 1;
+      }
+    };
+    if (IMAGE_EXTENSIONS.has(extension)) {
+      updateCoverage(identityAssignments.filter(assignment => assignment.visualImages.has(sourceStem)), 'images');
+    } else if (VIDEO_EXTENSIONS.has(extension)) {
+      updateCoverage(identityAssignments.filter(assignment => assignment.visualTemporal.has(sourceStem)), 'videosVisual');
+      updateCoverage(identityAssignments.filter(assignment => assignment.audio.has(sourceStem)), 'videosAudio');
+    } else if (AUDIO_EXTENSIONS.has(extension)) {
+      updateCoverage(identityAssignments.filter(assignment => assignment.audio.has(sourceStem)), 'audio');
+    }
   }
   return inventory;
 }
@@ -336,6 +398,8 @@ export async function collectDatasetInventories(
       inventories.push({
         path: selection.requestedPath,
         identityCount: 0,
+        identities: [],
+        jointIdentityPairs: [],
         images: emptyMediaInventory(),
         videos: emptyMediaInventory(),
         audio: emptyMediaInventory(),

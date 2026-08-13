@@ -327,6 +327,22 @@ class CaptionProcessingDTOMixin:
             self.extra_values: List[float] = dataset_config.extra_values
             self.trigger_word = dataset_config.trigger_word
 
+    def _apply_character_caption_plan(self: 'FileItemDTO', caption: str) -> str:
+        """Apply focused/joint identity caption semantics to a final caption."""
+        for trigger, description in sorted(
+            getattr(self, "character_caption_replacements", {}).items(),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
+            caption = caption.replace(trigger, description)
+        for trigger in getattr(self, "character_additional_triggers", []):
+            caption = inject_trigger_into_prompt(
+                caption,
+                trigger=trigger,
+                add_if_not_present=True,
+            )
+        return caption
+
     # todo allow for loading from sd-scripts style dict
     def load_caption(self: 'FileItemDTO', caption_dict: Union[dict, None]=None):
         if self.raw_caption is not None:
@@ -365,9 +381,11 @@ class CaptionProcessingDTOMixin:
             self.raw_caption = prompt
             self.raw_caption_short = short_caption
 
-        self.caption = self.get_caption()
+        self.caption = self._apply_character_caption_plan(self.get_caption())
         if self.raw_caption_short is not None:
-            self.caption_short = self.get_caption(short_caption=True)
+            self.caption_short = self._apply_character_caption_plan(
+                self.get_caption(short_caption=True)
+            )
         if self.dataset_config.diff_output_preservation:
             # replace this dataset's trigger word with the preservation class.
             # do it on the final caption so token order matches the normal caption
@@ -1585,6 +1603,10 @@ class MaskFileItemDTOMixin:
         self.character_dop_identity_catalog_present = False
         self.character_dop_identity_id = None
         self.character_dop_class_prompt = None
+        self.character_training_view_mode = None
+        self.character_training_identity_ids = ()
+        self.character_caption_replacements = {}
+        self.character_additional_triggers = []
         self.use_alpha_as_mask: bool = False
         dataset_config: 'DatasetConfig' = kwargs.get('dataset_config', None)
         self.mask_min_value = dataset_config.mask_min_value
@@ -1640,10 +1662,23 @@ class MaskFileItemDTOMixin:
                 media_path=Path(kwargs.get('path', None)),
             )
 
-    def bind_character_dop_identity(self: 'FileItemDTO', identity_view) -> None:
+    def bind_character_dop_identity(
+        self: 'FileItemDTO',
+        identity_view,
+        *,
+        view_mode=None,
+        identity_ids=(),
+        caption_replacements=None,
+        additional_triggers=None,
+    ) -> None:
         """Bind this virtual file item to one named identity annotation."""
         self.character_dop_identity_id = identity_view.identity_id
         self.character_dop_class_prompt = identity_view.class_prompt
+        self.character_dop_caption_description = identity_view.caption_description
+        self.character_training_view_mode = view_mode
+        self.character_training_identity_ids = tuple(identity_ids)
+        self.character_caption_replacements = dict(caption_replacements or {})
+        self.character_additional_triggers = list(additional_triggers or [])
         self.character_dop_identity_views = []
         self.trigger_word = identity_view.trigger_word
         self.character_dop_visual_mask_path = (
@@ -1657,6 +1692,8 @@ class MaskFileItemDTOMixin:
         # This item is now a distinct virtual cache view. Clear any path memoized
         # before expansion so its identity becomes part of the cache key.
         self._latent_path = None
+        self._text_embedding_path = None
+        self._blank_text_embedding_path = None
         self._dop_text_embedding_path = None
         self._dop_blank_text_embedding_path = None
 
@@ -1958,6 +1995,9 @@ class LatentCachingFileItemDTOMixin:
             # Keep their cache files independent so frame/audio metadata and masks
             # can never be paired with another identity's latent.
             item["character_dop_identity_id"] = character_identity_id
+        character_training_view_mode = getattr(self, "character_training_view_mode", None)
+        if character_training_view_mode is not None:
+            item["character_training_view_mode"] = character_training_view_mode
         return item
 
     def get_latent_path(self: 'FileItemDTO', recalculate=False):
@@ -2367,9 +2407,12 @@ class TextEmbeddingFileItemDTOMixin:
     def get_dropout_caption(self: 'FileItemDTO'):
         # when encoding live, dropped captions still get the trigger word injected
         # downstream (add_if_not_present when not a reg image), so match that here
+        caption = ''
         if self.trigger_word is not None and not self.is_reg:
-            return inject_trigger_into_prompt('', trigger=self.trigger_word, add_if_not_present=True)
-        return ''
+            caption = inject_trigger_into_prompt(
+                caption, trigger=self.trigger_word, add_if_not_present=True
+            )
+        return self._apply_character_caption_plan(caption)
 
     def get_dop_dropout_caption(self: 'FileItemDTO'):
         # live encoding replaces the trigger word with the preservation class on the

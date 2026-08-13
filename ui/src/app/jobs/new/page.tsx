@@ -21,6 +21,7 @@ import SimpleJob from './SimpleJob';
 import AdvancedConfigEditor from '@/components/AdvancedConfigEditor';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { apiClient } from '@/utils/api';
+import { validateCharacterTrainingCoverage } from './characterTrainingBalance';
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -189,6 +190,24 @@ export default function TrainingForm() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const process = jobConfig.config.process[0];
+    const characterTrainingEnabled = process.train.diff_output_preservation
+      && process.train.diff_output_preservation_mode === 'character';
+    if (characterTrainingEnabled) {
+      if (datasetStatsStatus !== 'success') {
+        alert('Wait for the character dataset inventory to finish before creating this job.');
+        return;
+      }
+      const errors = validateCharacterTrainingCoverage(
+        process.train.character_training,
+        process.datasets,
+        datasetStats,
+      );
+      if (errors.length) {
+        alert(`Character training cannot start:\n\n${errors.join('\n')}`);
+        return;
+      }
+    }
     saveJob();
   };
 

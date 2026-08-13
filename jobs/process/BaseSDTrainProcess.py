@@ -160,6 +160,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
             for raw_dataset in raw_datasets:
                 raw_dataset['diff_output_preservation'] = True
                 raw_dataset['diff_output_preservation_class'] = self.train_config.diff_output_preservation_class
+                if (
+                    self.train_config.character_training is not None
+                    and not raw_dataset.get('is_reg', False)
+                ):
+                    raw_dataset['character_training'] = self.train_config.character_training
         
         if raw_datasets is not None and len(raw_datasets) > 0:
             for raw_dataset in raw_datasets:

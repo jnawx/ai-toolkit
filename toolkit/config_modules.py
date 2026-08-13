@@ -495,6 +495,12 @@ class TrainConfig:
             raise ValueError(
                 "diff_output_preservation_mode must be either 'standard' or 'character'"
             )
+        self.character_training = kwargs.get('character_training', None)
+        if self.character_training is not None:
+            if self.diff_output_preservation_mode != 'character':
+                raise ValueError("character_training requires Character LoRA DOP mode")
+            if not isinstance(self.character_training, dict):
+                raise ValueError("character_training must be an object")
         try:
             self.diff_output_preservation_focus_fraction = float(
                 kwargs.get('diff_output_preservation_focus_fraction', 0.25)
@@ -1066,6 +1072,9 @@ class DatasetConfig:
         self.character_dop_use_dataset_annotations: bool = kwargs.get(
             'character_dop_use_dataset_annotations', True
         )
+        # Job-level selected-identity curriculum, copied onto each trainable
+        # dataset by BaseSDTrainProcess so filtering happens before caching.
+        self.character_training = kwargs.get('character_training', None)
         self.unconditional_path: str = kwargs.get('unconditional_path',
                                                   None)  # path where matching unconditional images are located
         self.invert_mask: bool = kwargs.get('invert_mask', False)  # invert mask
@@ -1568,6 +1577,13 @@ def validate_configs(
         raise ValueError(
             "Character LoRA DOP is currently supported only by MiniMax-H3"
         )
+
+    if train_config.character_training is not None:
+        from toolkit.character_training_sampler import validate_character_training_strategy
+
+        validate_character_training_strategy(train_config.character_training)
+        if train_config.batch_size != 1:
+            raise ValueError("character_training currently requires batch_size: 1")
 
     for dataset in dataset_configs:
         if (

@@ -34,6 +34,7 @@ import { handleModelArchChange } from './utils';
 import { IoFlaskSharp } from 'react-icons/io5';
 import { isMac } from '@/helpers/basic';
 import { calculateDatasetBalance, type DatasetInventory } from './datasetBalance';
+import CharacterTrainingPanel from './CharacterTrainingPanel';
 
 type Props = {
   jobConfig: JobConfig;
@@ -1256,6 +1257,16 @@ export default function SimpleJob({
         <div>
           <Card title="Datasets">
             <>
+              {characterDopEnabled && (
+                <CharacterTrainingPanel
+                  value={jobConfig.config.process[0].train.character_training}
+                  onChange={value => setJobConfig(value, 'config.process[0].train.character_training')}
+                  datasets={jobConfig.config.process[0].datasets}
+                  inventories={datasetStats}
+                  inventoryStatus={datasetStatsStatus}
+                  refreshInventories={refreshDatasetStats}
+                />
+              )}
               <section className="mb-4 overflow-hidden rounded-lg border border-gray-700 bg-gray-900/60">
                 <div className="flex items-start justify-between gap-3 border-b border-gray-800 px-4 py-3">
                   <div>

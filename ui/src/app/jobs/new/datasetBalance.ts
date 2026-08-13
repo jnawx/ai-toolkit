@@ -7,6 +7,8 @@ export type DatasetMediaInventory = {
 export type DatasetInventory = {
   path: string;
   identityCount: number;
+  identities?: import('./characterTrainingBalance').CharacterIdentityCoverage[];
+  jointIdentityPairs?: [string, string][];
   images: DatasetMediaInventory;
   videos: DatasetMediaInventory;
   audio: DatasetMediaInventory;

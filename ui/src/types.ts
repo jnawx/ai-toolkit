@@ -112,6 +112,22 @@ export interface DatasetConfig {
   control_path_2?: string | null;
   control_path_3?: string | null;
   auto_frame_count?: boolean;
+  trigger_word?: string | null;
+  character_dop_use_dataset_annotations?: boolean;
+}
+
+export interface CharacterTrainingIdentityConfig {
+  id: string;
+  weight: number;
+  solo_fraction?: number;
+  context_fractions?: Partial<Record<'image' | 'video' | 'audio', number>>;
+  source_weights?: Record<string, number>;
+}
+
+export interface CharacterTrainingConfig {
+  identities: CharacterTrainingIdentityConfig[];
+  joint_training_fraction: number;
+  epoch_size?: number;
 }
 
 export interface EMAConfig {
@@ -175,6 +191,7 @@ export interface TrainConfig {
   validation_config?: ValidationConfig;
   do_guidance_loss?: boolean;
   guidance_loss_target?: number;
+  character_training?: CharacterTrainingConfig;
 }
 
 export interface QuantizeKwargsConfig {

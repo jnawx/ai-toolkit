@@ -17,6 +17,7 @@ type CharacterIdentity = {
   display_name: string;
   trigger_word: string;
   class_prompt: string;
+  caption_description: string;
 };
 
 type AnnotationState = {
@@ -26,6 +27,7 @@ type AnnotationState = {
   visual: { exists: boolean; path: string; shape: number[] | null };
   audio: { exists: boolean; path: string; intervals: SpeakingInterval[] };
   prompts: CharacterPrompt[];
+  caption_description_override: string | null;
 };
 
 type MaskModel = {
@@ -47,6 +49,7 @@ type MaskCandidate = {
   box: [number, number, number, number];
   area: number;
   mask_data_url: string;
+  existing_identity_id?: string | null;
 };
 
 type DetectionResult = {
@@ -69,6 +72,7 @@ type Props = {
   datasetName: string;
   mediaPath: string;
   onClose: () => void;
+  embedded?: boolean;
 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -180,7 +184,7 @@ function SpeakingTimeline({
   );
 }
 
-export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, onClose }: Props) {
+export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, onClose, embedded = false }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const identitySelectionInitializedRef = useRef(false);
@@ -189,9 +193,12 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
   const [newIdentityName, setNewIdentityName] = useState('');
   const [newIdentityTrigger, setNewIdentityTrigger] = useState('');
   const [newIdentityClass, setNewIdentityClass] = useState('a person');
+  const [newIdentityDescription, setNewIdentityDescription] = useState('');
   const [editIdentityName, setEditIdentityName] = useState('');
   const [editIdentityTrigger, setEditIdentityTrigger] = useState('');
   const [editIdentityClass, setEditIdentityClass] = useState('');
+  const [editIdentityDescription, setEditIdentityDescription] = useState('');
+  const [captionDescriptionOverride, setCaptionDescriptionOverride] = useState('');
   const [prompts, setPrompts] = useState<CharacterPrompt[]>([]);
   const [intervals, setIntervals] = useState<SpeakingInterval[]>([]);
   const [pointLabel, setPointLabel] = useState<0 | 1>(1);
@@ -206,6 +213,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
   const [concept, setConcept] = useState('person');
   const [detection, setDetection] = useState<DetectionResult | null>(null);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
+  const [candidateAssignments, setCandidateAssignments] = useState<Record<number, string>>({});
   const [peaks, setPeaks] = useState<number[]>([]);
   const [markStart, setMarkStart] = useState<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -258,6 +266,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
         setState(nextState);
         setPrompts(nextState.prompts ?? []);
         setIntervals(nextState.audio?.intervals ?? []);
+        setCaptionDescriptionOverride(nextState.caption_description_override ?? '');
         if (!identitySelectionInitializedRef.current) {
           identitySelectionInitializedRef.current = true;
           if (activeIdentityId == null && nextState.identities.length) {
@@ -341,11 +350,15 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     setEditIdentityName(state?.identity?.display_name ?? '');
     setEditIdentityTrigger(state?.identity?.trigger_word ?? '');
     setEditIdentityClass(state?.identity?.class_prompt ?? '');
+    setEditIdentityDescription(state?.identity?.caption_description ?? '');
+    setCaptionDescriptionOverride(state?.caption_description_override ?? '');
   }, [
     state?.identity?.id,
     state?.identity?.display_name,
     state?.identity?.trigger_word,
     state?.identity?.class_prompt,
+    state?.identity?.caption_description,
+    state?.caption_description_override,
   ]);
 
   const frameIndex = useMemo(() => {
@@ -452,7 +465,12 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
         modelId: detectorModel,
       });
       setDetection(result);
-      setSelectedCandidateIds(result.candidates.map(candidate => candidate.id));
+      setSelectedCandidateIds([]);
+      setCandidateAssignments(Object.fromEntries(
+        result.candidates
+          .filter(candidate => candidate.existing_identity_id)
+          .map(candidate => [candidate.id, candidate.existing_identity_id as string]),
+      ));
       if (result.candidates.length) {
         setPrompts(previous =>
           previous.filter(prompt => videoItem && Math.abs(prompt.time_seconds - seedTime) > 0.08),
@@ -461,7 +479,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       setShowPreview(false);
       setMessage(
         result.candidates.length
-          ? `Found ${result.candidates.length} ${result.concept} instance(s). They all start included; exclude everyone except the training character.${seedPointCount ? ` Cleared ${seedPointCount} seed-frame point(s) because the auto-mask replaces them.` : ''}`
+          ? `Found ${result.candidates.length} ${result.concept} instance(s). Existing masks are recognized and protected. Assign only the unmasked people you want to add, or click one person to track it manually.${seedPointCount ? ` Cleared ${seedPointCount} seed-frame point(s) because the auto-mask replaces them.` : ''}`
           : `SAM 3 did not find any instances matching “${result.concept}” on this frame.`,
       );
     } catch (reason: any) {
@@ -516,6 +534,52 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     }
   };
 
+  const saveAssignedPeople = async () => {
+    if (!detection) return;
+    const assignments = detection.candidates.filter(
+      candidate => !candidate.existing_identity_id && candidateAssignments[candidate.id],
+    );
+    if (!assignments.length) {
+      setError('Assign at least one unmasked person to an identity. Existing masks will not be overwritten.');
+      return;
+    }
+    setBusy('track');
+    setError(null);
+    videoRef.current?.pause();
+    try {
+      let activeState: AnnotationState | null = null;
+      for (const [index, candidate] of assignments.entries()) {
+        const identityId = candidateAssignments[candidate.id];
+        const identity = state?.identities.find(item => item.id === identityId);
+        setMessage(`Tracking ${identity?.display_name ?? identityId} (${index + 1} of ${assignments.length}) without changing existing masks…`);
+        const nextState: AnnotationState = await request('track', {
+          identityId,
+          prompts: [],
+          initialMasks: [candidate.mask_data_url],
+          initialTimeSeconds: detection.time_seconds,
+          modelId: trackerModel,
+        });
+        if (identityId === activeIdentityId) activeState = nextState;
+      }
+      if (activeState) {
+        setState(activeState);
+        setPrompts(activeState.prompts);
+      } else {
+        await loadState(activeIdentityId);
+      }
+      setDetection(null);
+      setSelectedCandidateIds([]);
+      setCandidateAssignments({});
+      setPreviewRevision(previous => previous + 1);
+      setShowPreview(true);
+      setMessage(`Saved ${assignments.length} newly assigned identity mask(s). Existing annotations were left unchanged.`);
+    } catch (reason: any) {
+      setError(reason?.response?.data?.error || reason.message || 'Assigned people could not be tracked');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const createIdentity = async () => {
     const triggerWord = newIdentityTrigger.trim();
     const identitySlug = triggerWord
@@ -527,8 +591,8 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       ? globalThis.crypto.randomUUID().slice(0, 8)
       : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`.slice(0, 8);
     const identityId = identitySlug ? `${identitySlug}-${identitySuffix}` : '';
-    if (!identityId || !newIdentityName.trim() || !newIdentityClass.trim()) {
-      setError('Display name, trigger word, and generic class prompt are required.');
+    if (!identityId || !newIdentityName.trim() || !newIdentityClass.trim() || !newIdentityDescription.trim()) {
+      setError('Display name, trigger word, generic class prompt, and caption description are required.');
       return;
     }
     setBusy('identity');
@@ -539,6 +603,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
         displayName: newIdentityName.trim(),
         triggerWord,
         classPrompt: newIdentityClass.trim(),
+        captionDescription: newIdentityDescription.trim(),
       });
       setActiveIdentityId(identityId);
       identitySelectionInitializedRef.current = true;
@@ -552,6 +617,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       setIntervals(nextState.audio?.intervals ?? []);
       setNewIdentityName('');
       setNewIdentityTrigger('');
+      setNewIdentityDescription('');
       setMessage(`${nextState.identity?.display_name ?? triggerWord} is ready to annotate on this media.`);
     } catch (reason: any) {
       setError(reason?.response?.data?.error || reason.message || 'Character identity could not be saved');
@@ -561,8 +627,8 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
   };
 
   const updateIdentity = async () => {
-    if (!state?.identity || !editIdentityName.trim() || !editIdentityTrigger.trim() || !editIdentityClass.trim()) {
-      setError('Display name, trigger word, and generic class prompt are required.');
+    if (!state?.identity || !editIdentityName.trim() || !editIdentityTrigger.trim() || !editIdentityClass.trim() || !editIdentityDescription.trim()) {
+      setError('Display name, trigger word, generic class prompt, and caption description are required.');
       return;
     }
     const previousTrigger = state.identity.trigger_word;
@@ -574,6 +640,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
         displayName: editIdentityName.trim(),
         triggerWord: editIdentityTrigger.trim(),
         classPrompt: editIdentityClass.trim(),
+        captionDescription: editIdentityDescription.trim(),
       });
       setState(nextState);
       setMessage(
@@ -583,6 +650,25 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       );
     } catch (reason: any) {
       setError(reason?.response?.data?.error || reason.message || 'Character identity could not be updated');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveDescriptionOverride = async () => {
+    if (!state?.identity) return;
+    setBusy('identity');
+    setError(null);
+    try {
+      const nextState: AnnotationState = await request('save-description', {
+        identityId: state.identity.id,
+        captionDescription: captionDescriptionOverride.trim() || null,
+      });
+      setState(nextState);
+      setCaptionDescriptionOverride(nextState.caption_description_override ?? '');
+      setMessage(nextState.caption_description_override ? 'Saved the media-specific caption description.' : 'Cleared the media-specific caption description; the global description will be used.');
+    } catch (reason: any) {
+      setError(reason?.response?.data?.error || reason.message || 'Caption description could not be saved');
     } finally {
       setBusy(null);
     }
@@ -622,6 +708,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
       setPreview(null);
       setDetection(null);
       setSelectedCandidateIds([]);
+      setCandidateAssignments({});
       setMessage(
         nextState.cleanup_pending
           ? `Deleted ${nextState.deleted_identity.display_name}. Its annotations are ignored by training, but some files could not be removed. Restart the toolkit, then remove leftover identity files from the affected datasets' _character_dop folders if they remain.`
@@ -634,11 +721,8 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
     }
   };
 
-  return (
-    <Dialog open={open} onClose={() => !busy && onClose()} className="relative z-[70]">
-      <DialogBackdrop className="fixed inset-0 bg-black/80" />
-      <div className="fixed inset-0 flex items-center justify-center p-2 sm:p-5">
-        <DialogPanel className="flex max-h-[96vh] w-full max-w-7xl flex-col overflow-hidden rounded-xl border border-gray-700 bg-gray-950 shadow-2xl">
+  const content = (
+    <>
           <div className="flex items-center gap-3 border-b border-gray-800 px-4 py-3">
             <ScanSearch className="text-violet-400" />
             <div className="min-w-0 flex-1">
@@ -800,6 +884,13 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                         placeholder="Generic class prompt"
                         className="col-span-2 min-w-0 rounded border border-gray-700 bg-gray-900 px-2.5 py-2 text-gray-100"
                       />
+                      <textarea
+                        value={editIdentityDescription}
+                        onChange={event => setEditIdentityDescription(event.target.value)}
+                        aria-label="Selected identity caption description"
+                        placeholder="Rich caption description"
+                        className="col-span-2 min-h-20 min-w-0 rounded border border-gray-700 bg-gray-900 px-2.5 py-2 text-gray-100"
+                      />
                     </div>
                     <p className="text-[11px] leading-relaxed text-amber-300/80">
                       Changing a trigger does not rewrite caption files. Replace the old trigger in captions across every affected dataset before training.
@@ -807,7 +898,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         type="button"
-                        disabled={Boolean(busy) || !editIdentityName.trim() || !editIdentityTrigger.trim() || !editIdentityClass.trim()}
+                        disabled={Boolean(busy) || !editIdentityName.trim() || !editIdentityTrigger.trim() || !editIdentityClass.trim() || !editIdentityDescription.trim()}
                         onClick={updateIdentity}
                         className="flex items-center justify-center gap-1.5 rounded border border-violet-700 px-2 py-2 text-xs text-violet-200 hover:bg-violet-950/50 disabled:opacity-40"
                       >
@@ -845,10 +936,16 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                     placeholder="Generic class prompt"
                     className="col-span-2 min-w-0 rounded border border-gray-700 bg-gray-950 px-2.5 py-2 text-gray-100"
                   />
+                  <textarea
+                    value={newIdentityDescription}
+                    onChange={event => setNewIdentityDescription(event.target.value)}
+                    placeholder="Rich global caption description"
+                    className="col-span-2 min-h-20 min-w-0 rounded border border-gray-700 bg-gray-950 px-2.5 py-2 text-gray-100"
+                  />
                 </div>
                 <button
                   type="button"
-                  disabled={Boolean(busy) || !newIdentityName.trim() || !newIdentityTrigger.trim() || !newIdentityClass.trim()}
+                  disabled={Boolean(busy) || !newIdentityName.trim() || !newIdentityTrigger.trim() || !newIdentityClass.trim() || !newIdentityDescription.trim()}
                   onClick={createIdentity}
                   className="flex w-full items-center justify-center gap-2 rounded border border-violet-700 px-3 py-2 text-violet-200 hover:bg-violet-950/50 disabled:opacity-40"
                 >
@@ -856,10 +953,22 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                   Add identity
                 </button>
                 {state?.identity && (
-                  <p className="rounded bg-gray-950 p-2 text-[11px] text-gray-400">
-                    Active counterfactual: replace <span className="text-violet-300">{state.identity.trigger_word}</span> with{' '}
-                    <span className="text-violet-300">{state.identity.class_prompt}</span>, while leaving other named characters in the caption unchanged.
-                  </p>
+                  <div className="space-y-2 rounded bg-gray-950 p-2 text-[11px] text-gray-400">
+                    <p>
+                      Active counterfactual: replace <span className="text-violet-300">{state.identity.trigger_word}</span> with{' '}
+                      <span className="text-violet-300">{state.identity.class_prompt}</span>. Focused views replace other people with their rich descriptions.
+                    </p>
+                    <label className="block text-gray-300">Description override for this media</label>
+                    <textarea
+                      value={captionDescriptionOverride}
+                      onChange={event => setCaptionDescriptionOverride(event.target.value)}
+                      placeholder={state.identity.caption_description}
+                      className="min-h-20 w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-gray-100"
+                    />
+                    <button type="button" disabled={Boolean(busy)} onClick={saveDescriptionOverride} className="w-full rounded border border-gray-700 px-2 py-1.5 text-gray-300 hover:bg-gray-800 disabled:opacity-40">
+                      Save media description override
+                    </button>
+                  </div>
                 )}
               </section>
 
@@ -927,7 +1036,7 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                         </button>
                       </div>
                       <p className="text-[11px] leading-relaxed text-gray-400">
-                        All matches start included. Click a numbered person on the image or below to exclude everyone except your character.
+                        Assign unmasked people individually for safe batch annotation. A recognized existing mask is locked and will not be overwritten. You can still click one person to use the manual tracker below.
                       </p>
                       <div className="grid max-h-36 grid-cols-2 gap-1.5 overflow-y-auto">
                         {detection.candidates.map(candidate => {
@@ -946,11 +1055,40 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
                               <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white ${selected ? 'bg-violet-600' : 'bg-red-700'}`}>
                                 {candidate.id}
                               </span>
-                              <span>{selected ? 'Included' : 'Excluded'}</span>
+                              <span>{selected ? 'Manual selection' : candidate.existing_identity_id ? 'Already masked' : 'Click for manual'}</span>
                               <span className="ml-auto text-[10px] opacity-60">{Math.round(candidate.score * 100)}%</span>
                             </button>
                           );
                         })}
+                      </div>
+                      <div className="space-y-1.5 border-t border-gray-800 pt-2">
+                        {detection.candidates.map(candidate => {
+                          const existing = candidate.existing_identity_id;
+                          return (
+                            <label key={`assignment-${candidate.id}`} className="flex items-center gap-2 text-[11px] text-gray-400">
+                              <span className="w-16">Person {candidate.id}</span>
+                              <select
+                                className="min-w-0 flex-1 rounded border border-gray-700 bg-gray-950 px-2 py-1.5 text-xs text-gray-200 disabled:opacity-60"
+                                disabled={Boolean(existing) || Boolean(busy)}
+                                value={candidateAssignments[candidate.id] ?? ''}
+                                onChange={event => setCandidateAssignments(previous => ({ ...previous, [candidate.id]: event.target.value }))}
+                              >
+                                <option value="">Leave unassigned</option>
+                                {state?.identities.map(identity => <option key={identity.id} value={identity.id}>{identity.display_name}</option>)}
+                              </select>
+                              {existing && <span className="text-emerald-400">protected</span>}
+                            </label>
+                          );
+                        })}
+                        <button
+                          type="button"
+                          onClick={() => void saveAssignedPeople()}
+                          disabled={Boolean(busy) || !detection.candidates.some(candidate => !candidate.existing_identity_id && candidateAssignments[candidate.id])}
+                          className="flex w-full items-center justify-center gap-2 rounded bg-emerald-700 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+                        >
+                          {busy === 'track' ? <Loader2 size={15} className="animate-spin" /> : <Users size={15} />}
+                          Save assigned unmasked people
+                        </button>
                       </div>
                       {selectedCandidates.length > 1 && (
                         <p className="rounded border border-amber-800 bg-amber-950/40 p-2 text-[11px] text-amber-200">
@@ -1123,6 +1261,17 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
               )}
             </aside>
           </div>
+    </>
+  );
+  if (embedded) {
+    return <div className="flex h-full w-full flex-col overflow-hidden bg-gray-950">{content}</div>;
+  }
+  return (
+    <Dialog open={open} onClose={() => !busy && onClose()} className="relative z-[70]">
+      <DialogBackdrop className="fixed inset-0 bg-black/80" />
+      <div className="fixed inset-0 flex items-center justify-center p-2 sm:p-5">
+        <DialogPanel className="flex max-h-[96vh] w-full max-w-7xl flex-col overflow-hidden rounded-xl border border-gray-700 bg-gray-950 shadow-2xl">
+          {content}
         </DialogPanel>
       </div>
     </Dialog>

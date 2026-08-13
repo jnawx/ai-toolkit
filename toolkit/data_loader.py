@@ -20,6 +20,11 @@ from toolkit import image_utils
 from toolkit.audio.processing import plan_audio_segment
 from toolkit.buckets import get_bucket_for_image_size, BucketResolution
 from toolkit.character_dop_annotation import is_character_annotation_artifact
+from toolkit.character_training_sampler import (
+    CharacterTrainingCandidate,
+    CoverageWeightedSampler,
+    build_character_sampling_plan,
+)
 from toolkit.config_modules import DatasetConfig, preprocess_dataset_raw_config
 from toolkit.dataloader_mixins import CaptionMixin, BucketsMixin, LatentCachingMixin, Augments, CLIPCachingMixin, ControlCachingMixin, TextEmbeddingCachingMixin
 from toolkit.data_transfer_object.data_loader import FileItemDTO, DataLoaderBatchDTO
@@ -48,6 +53,57 @@ def expand_character_identity_file_items(file_items):
     expanded = []
     for file_item in file_items:
         identity_views = getattr(file_item, "character_dop_identity_views", [])
+        strategy = getattr(file_item.dataset_config, "character_training", None)
+        if strategy and not file_item.is_reg:
+            selected_ids = [
+                str(identity.get("id", "")).strip()
+                for identity in strategy.get("identities", [])
+                if isinstance(identity, dict) and str(identity.get("id", "")).strip()
+            ]
+            selected_id_set = set(selected_ids)
+            selected_views = [
+                view for view in identity_views if view.identity_id in selected_id_set
+            ]
+            # A selected-identity job deliberately treats each configured dataset
+            # as a media pool. Sources without a selected annotation never become
+            # training or cache-preparation items.
+            if not selected_views:
+                continue
+            all_identity_ids = tuple(view.identity_id for view in identity_views)
+
+            def append_view(identity_view, view_mode):
+                identity_item = copy.deepcopy(file_item)
+                retained_ids = (
+                    selected_id_set if view_mode == "joint" else {identity_view.identity_id}
+                )
+                replacements = {
+                    view.trigger_word: view.caption_description
+                    for view in identity_views
+                    if view.identity_id not in retained_ids
+                }
+                additional_triggers = [
+                    view.trigger_word
+                    for view in selected_views
+                    if view.identity_id != identity_view.identity_id
+                ] if view_mode == "joint" else []
+                identity_item.bind_character_dop_identity(
+                    identity_view,
+                    view_mode=view_mode,
+                    identity_ids=all_identity_ids,
+                    caption_replacements=replacements,
+                    additional_triggers=additional_triggers,
+                )
+                expanded.append(identity_item)
+
+            for identity_view in selected_views:
+                append_view(identity_view, "focus")
+            if (
+                float(strategy.get("joint_training_fraction", 0.0) or 0.0) > 0.0
+                and len(selected_views) > 1
+            ):
+                for identity_view in selected_views:
+                    append_view(identity_view, "joint")
+            continue
         if not identity_views:
             if (
                 getattr(file_item, "character_dop_identity_catalog_present", False)
@@ -64,6 +120,63 @@ def expand_character_identity_file_items(file_items):
             identity_item.bind_character_dop_identity(identity_view)
             expanded.append(identity_item)
     return expanded
+
+
+def build_character_training_sampler(concatenated_dataset, *, seed=0):
+    """Build one strict sampler for every selected-identity training dataset."""
+    datasets = list(getattr(concatenated_dataset, "datasets", []))
+    strategies = [
+        dataset.dataset_config.character_training
+        for dataset in datasets
+        if getattr(dataset.dataset_config, "character_training", None)
+    ]
+    if not strategies:
+        return None
+    strategy = strategies[0]
+    if any(candidate != strategy for candidate in strategies[1:]):
+        raise ValueError("all selected-identity datasets must use the same character training strategy")
+
+    candidates = []
+    for dataset in datasets:
+        dataset_path = str(dataset.dataset_config.folder_path)
+        if getattr(dataset.dataset_config, "buckets", False):
+            if any(len(indices) != 1 for indices in dataset.batch_indices):
+                raise ValueError(
+                    "selected-identity character training currently requires batch_size: 1"
+                )
+            ordered_items = [dataset.file_list[indices[0]] for indices in dataset.batch_indices]
+        else:
+            ordered_items = dataset.file_list
+        for file_item in ordered_items:
+            identity_id = getattr(file_item, "character_dop_identity_id", None)
+            view_mode = getattr(file_item, "character_training_view_mode", None)
+            if identity_id is None or view_mode is None:
+                continue
+            media_type = (
+                "audio" if file_item.is_audio_only
+                else "video" if file_item.is_video
+                else "image"
+            )
+            candidates.append(
+                CharacterTrainingCandidate(
+                    key=(
+                        f"{dataset_path}:{file_item.path}:{identity_id}:{view_mode}"
+                    ),
+                    source_id=f"{dataset_path}:{file_item.path}",
+                    identity_id=identity_id,
+                    identity_ids=tuple(file_item.character_training_identity_ids),
+                    view_mode=view_mode,
+                    media_type=media_type,
+                    dataset_path=dataset_path,
+                )
+            )
+    plan = build_character_sampling_plan(candidates, strategy)
+    epoch_size = max(
+        len(candidates),
+        int(strategy.get("epoch_size", 0) or 0),
+        len(candidates) * max(1, len(strategy.get("identities", []))),
+    )
+    return CoverageWeightedSampler(plan.probabilities, epoch_size, seed=seed)
 
 
 class RescaleTransform:
@@ -779,6 +892,7 @@ def get_dataloader_from_datasets(
             raise ValueError(f"invalid dataset type: {config.type}")
 
     concatenated_dataset = ConcatDataset(datasets)
+    character_sampler = build_character_training_sampler(concatenated_dataset)
 
     # todo build scheduler that can get buckets from all datasets that match
     # todo and evenly distribute reg images
@@ -813,7 +927,8 @@ def get_dataloader_from_datasets(
             concatenated_dataset,
             batch_size=None,  # we batch in the datasets for now
             drop_last=False,
-            shuffle=True,
+            shuffle=character_sampler is None,
+            sampler=character_sampler,
             collate_fn=dto_collation,  # Use the custom collate function
             **dataloader_kwargs
         )
@@ -821,7 +936,8 @@ def get_dataloader_from_datasets(
         data_loader = DataLoader(
             concatenated_dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=character_sampler is None,
+            sampler=character_sampler,
             collate_fn=dto_collation,
             **dataloader_kwargs
         )

@@ -4,6 +4,22 @@ from pathlib import Path
 
 
 class CharacterDOPUIContractTests(unittest.TestCase):
+    def test_character_annotation_route_forwards_the_saved_hugging_face_token(self):
+        route = (
+            Path(__file__).parents[1]
+            / "ui"
+            / "src"
+            / "app"
+            / "api"
+            / "datasets"
+            / "characterDop"
+            / "route.ts"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("getHFToken", route)
+        self.assertIn("HF_TOKEN: hfToken", route)
+        self.assertIn("HUGGING_FACE_HUB_TOKEN: hfToken", route)
+
     def test_dataset_video_card_can_open_the_media_viewer(self):
         source = (
             Path(__file__).parents[1] / "ui" / "src" / "components" / "DatasetImageCard.tsx"

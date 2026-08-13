@@ -2,7 +2,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Dialog, DialogBackdrop, DialogPanel } from '@headlessui/react';
-import { Cog, ScanSearch, SquareDashed } from 'lucide-react';
+import { Cog, Layers3, ScanSearch, SquareDashed } from 'lucide-react';
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 import classNames from 'classnames';
 import { openConfirm } from './ConfirmModal';
@@ -14,6 +14,46 @@ import { BoundingBoxEditor, parseBoundingBoxes, extractBoxes } from './BoundingB
 import IdeogramCaptionSidebar, { isIdeogramCaption } from './IdeogramCaptionSidebar';
 import datasetTemplates from '@/helpers/datasetTemplates';
 import CharacterDOPAnnotator from './CharacterDOPAnnotator';
+
+type IdentityOverlay = {
+  identity_id: string;
+  display_name: string;
+  data_url: string;
+  centroid: [number, number];
+};
+
+const IDENTITY_COLORS = ['#22d3ee', '#f472b6', '#a3e635', '#fb923c', '#c084fc', '#facc15'];
+const IDENTITY_OVERLAY_STORAGE_KEY = 'ai-toolkit.character-dop.show-identity-overlays';
+
+function IdentityOverlayLayer({ overlays }: { overlays: IdentityOverlay[] }) {
+  return (
+    <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
+      {overlays.map((overlay, index) => {
+        const color = IDENTITY_COLORS[index % IDENTITY_COLORS.length];
+        return (
+          <div key={overlay.identity_id} className="absolute inset-0">
+            <div
+              className="absolute inset-0 opacity-45"
+              style={{
+                backgroundColor: color,
+                WebkitMaskImage: `url(${overlay.data_url})`,
+                maskImage: `url(${overlay.data_url})`,
+                WebkitMaskSize: '100% 100%',
+                maskSize: '100% 100%',
+              }}
+            />
+            <span
+              className="absolute -translate-x-1/2 -translate-y-1/2 rounded px-1.5 py-0.5 text-[11px] font-semibold text-gray-950 shadow"
+              style={{ left: `${overlay.centroid[0] * 100}%`, top: `${overlay.centroid[1] * 100}%`, backgroundColor: color }}
+            >
+              {overlay.display_name}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 function safeParse(text: string): any {
   try {
@@ -51,6 +91,9 @@ export default function DatasetImageViewer({
   const [selectedBoxIndex, setSelectedBoxIndex] = useState<number | null>(null);
   const [isDrawing, setIsDrawing] = useState<boolean>(false);
   const [showCharacterAnnotator, setShowCharacterAnnotator] = useState(false);
+  const [showIdentityOverlays, setShowIdentityOverlays] = useState(true);
+  const [identityOverlays, setIdentityOverlays] = useState<IdentityOverlay[]>([]);
+  const [overlayTimeFraction, setOverlayTimeFraction] = useState(0);
   const captionRef = useRef<string>('');
   const savedCaptionRef = useRef<string>('');
   const currentImgPathRef = useRef<string | null>(null);
@@ -58,14 +101,45 @@ export default function DatasetImageViewer({
 
   const isIdeogram = useMemo(() => isIdeogramCaption(caption), [caption]);
 
-  useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    setMounted(true);
+    setShowIdentityOverlays(window.localStorage.getItem(IDENTITY_OVERLAY_STORAGE_KEY) !== 'false');
+  }, []);
+
+  const toggleIdentityOverlays = () => {
+    setShowIdentityOverlays(current => {
+      const next = !current;
+      window.localStorage.setItem(IDENTITY_OVERLAY_STORAGE_KEY, String(next));
+      return next;
+    });
+  };
 
   // Clear box selection / draw mode whenever the image changes.
   useEffect(() => {
     setSelectedBoxIndex(null);
     setIsDrawing(false);
     setShowCharacterAnnotator(false);
+    setOverlayTimeFraction(0);
   }, [imgPath]);
+
+  useEffect(() => {
+    if (!imgPath || isAudio(imgPath) || !showIdentityOverlays || !isOpen) {
+      setIdentityOverlays([]);
+      return;
+    }
+    const controller = new AbortController();
+    apiClient.post('/api/datasets/characterDop', {
+      action: 'overlays',
+      datasetName,
+      mediaPath: imgPath,
+      timeFraction: isVideo(imgPath) ? overlayTimeFraction : 0,
+    }, { signal: controller.signal }).then(response => {
+      if (!controller.signal.aborted) setIdentityOverlays(response.data.overlays ?? []);
+    }).catch(() => {
+      if (!controller.signal.aborted) setIdentityOverlays([]);
+    });
+    return () => controller.abort();
+  }, [datasetName, imgPath, isOpen, overlayTimeFraction, showIdentityOverlays]);
 
   // Default to showing the editable boxes when an Ideogram caption is present.
   useEffect(() => {
@@ -398,7 +472,11 @@ export default function DatasetImageViewer({
   if (!mounted) return null;
 
   return createPortal(
-    <Dialog open={isOpen} onClose={onCancel} className="relative z-50">
+    <Dialog
+      open={isOpen}
+      onClose={() => showCharacterAnnotator ? setShowCharacterAnnotator(false) : onCancel()}
+      className="relative z-50"
+    >
       <DialogBackdrop
         transition
         className="fixed inset-0 bg-gray-900/75 transition-opacity data-closed:opacity-0 data-enter:duration-300 data-enter:ease-out data-leave:duration-200 data-leave:ease-in"
@@ -419,15 +497,24 @@ export default function DatasetImageViewer({
                     <AudioPlayer src={`/api/img/${encodeURIComponent(imgPath)}`} title={filename} autoPlay />
                   </div>
                 ) : isVideo(imgPath) ? (
-                  <video
-                    src={`/api/img/${encodeURIComponent(imgPath)}`}
-                    className="w-auto h-auto max-w-full max-h-[50vh] sm:max-h-[90vh] object-contain"
-                    preload="none"
-                    playsInline
-                    loop
-                    autoPlay
-                    controls={true}
-                  />
+                  <div className="relative max-h-[50vh] max-w-full sm:max-h-[90vh]">
+                    <video
+                      src={`/api/img/${encodeURIComponent(imgPath)}`}
+                      className="block h-auto w-auto max-h-[50vh] max-w-full object-contain sm:max-h-[90vh]"
+                      preload="metadata"
+                      playsInline
+                      loop
+                      autoPlay
+                      controls={true}
+                      onTimeUpdate={event => {
+                        const video = event.currentTarget;
+                        if (!video.duration) return;
+                        const fraction = Math.round((video.currentTime / video.duration) * 20) / 20;
+                        setOverlayTimeFraction(current => current === fraction ? current : fraction);
+                      }}
+                    />
+                    {showIdentityOverlays && <IdentityOverlayLayer overlays={identityOverlays} />}
+                  </div>
                 ) : (
                   <TransformWrapper
                     key={imgPath}
@@ -449,6 +536,7 @@ export default function DatasetImageViewer({
                           draggable={false}
                           className="w-auto h-auto max-w-full max-h-[50vh] sm:max-h-[90vh] object-contain select-none !pointer-events-auto"
                         />
+                        {showIdentityOverlays && <IdentityOverlayLayer overlays={identityOverlays} />}
                         {showBoxes && (
                           <BoundingBoxEditor
                             boxes={editBoxes}
@@ -466,6 +554,19 @@ export default function DatasetImageViewer({
 
               {/* Controls over the image */}
               <div className="absolute top-2 right-2 flex items-center gap-2 z-20">
+                {imgPath && (
+                  <button
+                    type="button"
+                    onClick={toggleIdentityOverlays}
+                    title={showIdentityOverlays ? 'Hide saved identity masks' : 'Show saved identity masks'}
+                    className={classNames('rounded-full bg-gray-900 p-1 leading-[0px] hover:opacity-100', {
+                      'text-cyan-300 opacity-100': showIdentityOverlays,
+                      'opacity-50': !showIdentityOverlays,
+                    })}
+                  >
+                    <Layers3 />
+                  </button>
+                )}
                 {imgPath && (
                   <button
                     type="button"
@@ -547,6 +648,15 @@ export default function DatasetImageViewer({
                   <ScanSearch size={16} /> Annotate Character DOP
                 </button>
               )}
+              {showIdentityOverlays && identityOverlays.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {identityOverlays.map((overlay, index) => (
+                    <span key={overlay.identity_id} className="rounded px-2 py-1 text-[11px] font-medium text-gray-950" style={{ backgroundColor: IDENTITY_COLORS[index % IDENTITY_COLORS.length] }}>
+                      {overlay.display_name}
+                    </span>
+                  ))}
+                </div>
+              )}
               {isCaptionLoaded && caption.trim() === '' && (
                 <select
                   className="w-full bg-gray-900 border border-gray-700 text-gray-100 text-sm rounded p-2 outline-none focus:ring-0 focus:outline-none"
@@ -597,17 +707,20 @@ export default function DatasetImageViewer({
                 </div>
               )}
             </div>
+            {imgPath && showCharacterAnnotator && (
+              <div className="absolute inset-0 z-30">
+                <CharacterDOPAnnotator
+                  embedded
+                  open
+                  datasetName={datasetName}
+                  mediaPath={imgPath}
+                  onClose={() => setShowCharacterAnnotator(false)}
+                />
+              </div>
+            )}
           </DialogPanel>
         </div>
       </div>
-      {imgPath && (
-        <CharacterDOPAnnotator
-          open={showCharacterAnnotator}
-          datasetName={datasetName}
-          mediaPath={imgPath}
-          onClose={() => setShowCharacterAnnotator(false)}
-        />
-      )}
     </Dialog>,
     document.body,
   );

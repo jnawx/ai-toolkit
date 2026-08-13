@@ -7,6 +7,7 @@ import CharacterIdentityManager, { type CharacterIdentity } from '@/components/C
 import type { CharacterTrainingConfig, CharacterTrainingIdentityConfig, DatasetConfig } from '@/types';
 import { apiClient } from '@/utils/api';
 import type { DatasetInventory } from './datasetBalance';
+import { calculateCharacterIdentitySourceShares } from './characterSourceShares.mjs';
 import { validateCharacterTrainingCoverage } from './characterTrainingBalance';
 
 type Props = {
@@ -62,6 +63,7 @@ export default function CharacterTrainingPanel({
     dataset => !dataset.is_reg && dataset.folder_path.trim() && dataset.character_dop_use_dataset_annotations !== false,
   );
   const selected = new Map(strategy.identities.map(identity => [identity.id, identity]));
+  const selectedIds = new Set(strategy.identities.map(identity => identity.id));
   const recommendedSoloFraction = (identityId: string) => {
     let solo = 0;
     let group = 0;
@@ -104,38 +106,20 @@ export default function CharacterTrainingPanel({
     if (totalWeight <= 0) return shares;
     for (const selectedIdentity of strategy.identities) {
       const identityShare = Number(selectedIdentity.weight) / totalWeight;
-      const sourceCounts = trainingDatasets.map(dataset => {
-        const inventory = inventories[dataset.folder_path]
-          ?? Object.values(inventories).find(item => normalize(item.path) === normalize(dataset.folder_path));
-        const coverage = inventory?.identities?.find(identity => identity.id === selectedIdentity.id);
-        const count = coverage
-          ? coverageForDataset(dataset, coverage).reduce((sum, media) => sum + media.sources, 0)
-          : 0;
-        return { path: dataset.folder_path, count };
-      });
-      const explicit = Object.entries(selectedIdentity.source_weights ?? {})
-        .filter(([path]) => path !== '*')
-        .map(([path, weight]) => [normalize(path), Number(weight)] as const);
-      const explicitPaths = new Set(explicit.map(([path]) => path));
-      const explicitByPath = new Map(explicit);
-      const explicitTotal = explicit.reduce((sum, [, weight]) => sum + weight, 0);
-      const remainder = selectedIdentity.source_weights?.['*'] ?? Math.max(0, 1 - explicitTotal);
-      const automaticCount = sourceCounts.reduce(
-        (sum, source) => sum + (explicitPaths.has(normalize(source.path)) ? 0 : source.count),
-        0,
+      const sourceShares = calculateCharacterIdentitySourceShares(
+        selectedIdentity,
+        selectedIds,
+        strategy.joint_training_fraction,
+        trainingDatasets,
+        inventories,
       );
-      const allCount = sourceCounts.reduce((sum, source) => sum + source.count, 0);
-      for (const source of sourceCounts) {
-        const normalized = normalize(source.path);
-        const sourceShare = selectedIdentity.source_weights
-          ? explicitByPath.get(normalized)
-            ?? (automaticCount > 0 ? Number(remainder) * source.count / automaticCount : 0)
-          : allCount > 0 ? source.count / allCount : 0;
-        shares.set(source.path, (shares.get(source.path) ?? 0) + identityShare * sourceShare);
+      for (const [sourcePath, sourceShare] of sourceShares) {
+        const path = trainingDatasets.find(dataset => normalize(dataset.folder_path) === normalize(sourcePath))?.folder_path;
+        if (path) shares.set(path, (shares.get(path) ?? 0) + identityShare * sourceShare);
       }
     }
     return shares;
-  }, [inventories, strategy.identities, totalWeight, trainingDatasets]);
+  }, [inventories, strategy.identities, strategy.joint_training_fraction, totalWeight, trainingDatasets]);
 
   const coverageFor = (identityId: string) => trainingDatasets.reduce((total, dataset) => {
     const inventory = inventories[dataset.folder_path]

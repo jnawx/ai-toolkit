@@ -206,6 +206,34 @@ class CharacterTrainingSamplerTests(unittest.TestCase):
         self.assertAlmostEqual(plan.probabilities[0], 0.8)
         self.assertAlmostEqual(plan.probabilities[1], 0.2)
 
+    def test_source_targets_apply_across_focus_and_joint_modes(self):
+        candidates = [
+            CharacterTrainingCandidate(
+                key="a-focus", source_id="a-focus", identity_id="alice",
+                identity_ids=("alice",), view_mode="focus", media_type="image",
+                dataset_path="/datasets/a",
+            ),
+            CharacterTrainingCandidate(
+                key="b-joint", source_id="b-joint", identity_id="alice",
+                identity_ids=("alice", "bob"), view_mode="joint", media_type="image",
+                dataset_path="/datasets/b",
+            ),
+        ]
+
+        plan = build_character_sampling_plan(
+            candidates,
+            {
+                "identities": [{
+                    "id": "alice", "weight": 1, "solo_fraction": 1,
+                    "source_weights": {"/datasets/a": 0.8, "/datasets/b": 0.2},
+                }],
+                "joint_training_fraction": 0.2,
+            },
+        )
+
+        self.assertAlmostEqual(plan.probabilities[0], 0.8)
+        self.assertAlmostEqual(plan.probabilities[1], 0.2)
+
     def test_runtime_sampler_covers_every_virtual_view_before_weighted_repeats(self):
         sampler = CoverageWeightedSampler(
             probabilities=[0.7, 0.2, 0.1],

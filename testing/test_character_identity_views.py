@@ -16,6 +16,15 @@ from toolkit.data_transfer_object.data_loader import FileItemDTO
 
 
 class CharacterIdentityTrainingViewTests(unittest.TestCase):
+    def test_regularization_media_remains_one_physical_view(self):
+        source = SimpleNamespace(
+            is_reg=True,
+            character_dop_identity_views=[SimpleNamespace(identity_id="alice"), SimpleNamespace(identity_id="bob")],
+            dataset_config=SimpleNamespace(character_training=None),
+        )
+
+        self.assertEqual(expand_character_identity_file_items([source]), [source])
+
     def test_video_views_only_use_annotations_for_enabled_modalities(self):
         class Source:
             def __init__(self, *, do_audio):

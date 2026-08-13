@@ -240,6 +240,10 @@ console.log(JSON.stringify(await collectDatasetInventories({json.dumps(str(datas
             self.assertEqual(alice["videosVisual"], {"sources": 1, "solo": 1, "group": 0})
             self.assertEqual(inventory["jointIdentityPairsByMedia"]["videosVisual"], [])
             self.assertEqual(inventory["jointIdentityPairsByMedia"]["videos"], [["alice", "bob"]])
+            self.assertEqual(
+                inventory["identityGroupsByMedia"]["videos"],
+                [{"identityIds": ["alice", "bob"], "sources": 1}],
+            )
 
     def test_inventory_rejects_annotation_symlink_escape(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -415,6 +419,72 @@ console.log(JSON.stringify(calculateDatasetBalance([
         self.assertEqual(rows[0]["trainingViews"], 0)
         self.assertEqual(rows[1]["trainingViews"], 5)
         self.assertFalse(rows[1]["usesCharacterViews"])
+
+    def test_automatic_curriculum_shares_include_repeats_resolutions_and_flips(self):
+        module_path = (
+            Path(__file__).parents[1] / "ui" / "src" / "app" / "jobs" / "new" / "datasetBalance.ts"
+        ).resolve()
+        script = f"""
+import {{ pathToFileURL }} from 'node:url';
+const {{ calculateDatasetBalance }} = await import(pathToFileURL({json.dumps(str(module_path))}).href);
+const media = {{ sources: 1, solo: 1, group: 0 }};
+const empty = {{ sources: 0, solo: 0, group: 0 }};
+const datasets = [
+  {{ folder_path: '/a', resolution: [512, 768], num_frames: 1, num_repeats: 5, flip_x: true, flip_y: false, network_weight: 1, is_reg: false }},
+  {{ folder_path: '/b', resolution: [512], num_frames: 1, num_repeats: 1, flip_x: false, flip_y: false, network_weight: 1, is_reg: false }}
+];
+const inventory = sourcePath => ({{ path: sourcePath, identityCount: 1,
+  identities: [{{ id: 'alice', images: media, videos: empty, videosVisual: empty, videosAudio: empty, audio: empty }}],
+  images: {{ sources: 1, assignedSources: 1, characterViews: 1 }},
+  videos: {{ sources: 0, assignedSources: 0, characterViews: 0 }}, audio: {{ sources: 0, assignedSources: 0, characterViews: 0 }}
+}});
+console.log(JSON.stringify(calculateDatasetBalance(datasets, {{ '/a': inventory('/a'), '/b': inventory('/b') }}, {{
+  characterDop: true, globalTrigger: false,
+  characterTraining: {{ identities: [{{ id: 'alice', weight: 1 }}], joint_training_fraction: 0 }}
+}})));
+"""
+        completed = subprocess.run(
+            ["node", "--experimental-strip-types", "--input-type=module", "-e", script],
+            check=True, capture_output=True, text=True,
+        )
+        rows = json.loads(completed.stdout)
+
+        self.assertEqual(rows[0]["augmentationFactor"], 20)
+        self.assertAlmostEqual(rows[0]["samplingShare"], 20 / 21)
+        self.assertAlmostEqual(rows[1]["samplingShare"], 1 / 21)
+
+    def test_joint_view_projection_requires_two_selected_identities_on_the_source(self):
+        module_path = (
+            Path(__file__).parents[1] / "ui" / "src" / "app" / "jobs" / "new" / "datasetBalance.ts"
+        ).resolve()
+        script = f"""
+import {{ pathToFileURL }} from 'node:url';
+const {{ calculateDatasetBalance }} = await import(pathToFileURL({json.dumps(str(module_path))}).href);
+const media = {{ sources: 1, solo: 0, group: 1 }};
+const empty = {{ sources: 0, solo: 0, group: 0 }};
+const inventory = {{ path: '/group', identityCount: 2,
+  identities: [
+    {{ id: 'alice', images: media, videos: empty, videosVisual: empty, videosAudio: empty, audio: empty }},
+    {{ id: 'bob', images: media, videos: empty, videosVisual: empty, videosAudio: empty, audio: empty }}
+  ],
+  identityGroupsByMedia: {{ images: [{{ identityIds: ['alice', 'bob'], sources: 1 }}], videos: [], videosVisual: [], videosAudio: [], audio: [] }},
+  images: {{ sources: 1, assignedSources: 1, characterViews: 2 }},
+  videos: {{ sources: 0, assignedSources: 0, characterViews: 0 }}, audio: {{ sources: 0, assignedSources: 0, characterViews: 0 }}
+}};
+const dataset = {{ folder_path: '/group', resolution: [512], num_frames: 1, flip_x: false, flip_y: false, network_weight: 1, is_reg: false }};
+const run = identities => calculateDatasetBalance([dataset], {{ '/group': inventory }}, {{
+  characterDop: true, globalTrigger: false,
+  characterTraining: {{ identities, joint_training_fraction: 0.5 }}
+}})[0].trainingViews;
+console.log(JSON.stringify({{ aliceOnly: run([{{ id: 'alice', weight: 1 }}]), both: run([{{ id: 'alice', weight: 1 }}, {{ id: 'bob', weight: 1 }}]) }}));
+"""
+        completed = subprocess.run(
+            ["node", "--experimental-strip-types", "--input-type=module", "-e", script],
+            check=True, capture_output=True, text=True,
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result, {"aliceOnly": 1, "both": 4})
 
     def test_audio_model_flips_match_non_audio_only_loader_behavior(self):
         module_path = (

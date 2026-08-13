@@ -246,6 +246,50 @@ console.log(JSON.stringify(validateCharacterTrainingCoverage(
 
         self.assertTrue(any("carl" in error.lower() and "shared" in error.lower() for error in errors))
 
+    def test_source_mix_is_checked_across_focus_and_joint_rows(self):
+        datasets = [
+            {"folder_path": "/solo", "is_reg": False},
+            {"folder_path": "/joint", "is_reg": False},
+        ]
+        empty = {"sources": 0, "solo": 0, "group": 0}
+        solo = {"sources": 1, "solo": 1, "group": 0}
+        group = {"sources": 1, "solo": 0, "group": 1}
+        group_shape = {
+            "images": [{"identityIds": ["alice", "bob"], "sources": 1}],
+            "videos": [], "videosVisual": [], "videosAudio": [], "audio": [],
+        }
+        stats = {
+            "/solo": {
+                "path": "/solo",
+                "identities": [
+                    {"id": "alice", "images": solo, "videos": empty, "videosVisual": empty, "videosAudio": empty, "audio": empty},
+                ],
+                "identityGroupsByMedia": {"images": [{"identityIds": ["alice"], "sources": 1}], "videos": [], "videosVisual": [], "videosAudio": [], "audio": []},
+                "jointIdentityPairsByMedia": {"images": [], "videos": [], "videosVisual": [], "videosAudio": [], "audio": []},
+            },
+            "/joint": {
+                "path": "/joint",
+                "identities": [
+                    {"id": "alice", "images": group, "videos": empty, "videosVisual": empty, "videosAudio": empty, "audio": empty},
+                    {"id": "bob", "images": group, "videos": empty, "videosVisual": empty, "videosAudio": empty, "audio": empty},
+                ],
+                "identityGroupsByMedia": group_shape,
+                "jointIdentityPairsByMedia": {"images": [["alice", "bob"]], "videos": [], "videosVisual": [], "videosAudio": [], "audio": []},
+            },
+        }
+        base_identities = [
+            {"id": "alice", "weight": 1, "solo_fraction": 1, "source_weights": {"/solo": 0.8, "/joint": 0.2}},
+            {"id": "bob", "weight": 1, "solo_fraction": 0, "source_weights": {"/joint": 1}},
+        ]
+        strategy = {"identities": base_identities, "joint_training_fraction": 0.2}
+
+        valid_errors = self.run_validation(strategy, datasets, stats)
+        self.assertFalse(any("simultaneously" in error.lower() for error in valid_errors), valid_errors)
+
+        strategy["identities"][0]["source_weights"] = {"/solo": 0.5, "/joint": 0.5}
+        invalid_errors = self.run_validation(strategy, datasets, stats)
+        self.assertTrue(any("simultaneously" in error.lower() for error in invalid_errors))
+
 
 if __name__ == "__main__":
     unittest.main()

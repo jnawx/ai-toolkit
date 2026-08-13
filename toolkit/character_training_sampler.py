@@ -409,6 +409,7 @@ def build_character_sampling_plan(
     for identity_id, identity_probability in identity_weights.items():
         indices = candidates_by_identity[identity_id]
         identity_config = identity_configs[identity_id]
+        row_targets: dict[tuple[str, str], tuple[list[int], float]] = {}
         for view_mode, mode_fraction in (
             ("focus", 1.0 - joint_fraction),
             ("joint", joint_fraction),
@@ -425,13 +426,9 @@ def build_character_sampling_plan(
                 )
             mode_probability = identity_probability * mode_fraction
             if view_mode == "joint":
-                _allocate_source_probabilities(
-                    probabilities=probabilities,
-                    candidates=candidates,
-                    indices=mode_indices,
-                    total_probability=mode_probability,
-                    raw_source_weights=identity_config.get("source_weights"),
-                    identity_id=identity_id,
+                row_targets[("joint", "all")] = (
+                    mode_indices,
+                    mode_probability,
                 )
                 continue
 
@@ -443,7 +440,6 @@ def build_character_sampling_plan(
                 for modality in ("image", "video", "audio")
             }
             context_fractions = identity_config.get("context_fractions", {})
-            row_targets: dict[tuple[str, str], tuple[list[int], float]] = {}
             for modality, scoped_indices in modality_indices.items():
                 if not scoped_indices:
                     continue
@@ -479,17 +475,17 @@ def build_character_sampling_plan(
                             f"{identity_id} has no eligible {modality} {context} representation, "
                             f"but its requested fraction is {context_fraction:.3f}"
                         )
-                    row_targets[(modality, context)] = (
+                    row_targets[(f"focus:{modality}", context)] = (
                         context_indices,
                         modality_probability * context_fraction,
                     )
-            _allocate_context_source_probabilities(
-                probabilities=probabilities,
-                candidates=candidates,
-                row_targets=row_targets,
-                total_indices=mode_indices,
-                total_probability=mode_probability,
-                raw_source_weights=identity_config.get("source_weights"),
-                identity_id=identity_id,
-            )
+        _allocate_context_source_probabilities(
+            probabilities=probabilities,
+            candidates=candidates,
+            row_targets=row_targets,
+            total_indices=indices,
+            total_probability=identity_probability,
+            raw_source_weights=identity_config.get("source_weights"),
+            identity_id=identity_id,
+        )
     return CharacterSamplingPlan(probabilities=tuple(probabilities))

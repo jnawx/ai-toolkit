@@ -1,3 +1,5 @@
+import { characterSourceMixIsFeasible } from './characterSourceShares.mjs';
+
 export type CharacterMediaCoverage = { sources: number; solo: number; group: number };
 
 export type CharacterIdentityCoverage = {
@@ -31,6 +33,9 @@ type DatasetSelection = {
   num_frames?: number;
   auto_frame_count?: boolean;
   character_dop_use_dataset_annotations?: boolean;
+  num_repeats?: number;
+  flip_x?: boolean;
+  flip_y?: boolean;
 };
 
 type Inventory = {
@@ -43,6 +48,13 @@ type Inventory = {
     videosVisual: [string, string][];
     videosAudio: [string, string][];
     audio: [string, string][];
+  };
+  identityGroupsByMedia?: {
+    images: Array<{ identityIds: string[]; sources: number }>;
+    videos: Array<{ identityIds: string[]; sources: number }>;
+    videosVisual: Array<{ identityIds: string[]; sources: number }>;
+    videosAudio: Array<{ identityIds: string[]; sources: number }>;
+    audio: Array<{ identityIds: string[]; sources: number }>;
   };
   error?: string;
 };
@@ -136,6 +148,20 @@ export function validateCharacterTrainingCoverage(
       if (!source || total(source.coverage, 'sources') === 0) {
         errors.push(`${selected.id} requests ${Math.round(Number(weight) * 100)}% from ${sourcePath}, but that dataset has no eligible annotation.`);
       }
+    }
+    if (
+      selected.source_weights
+      && !characterSourceMixIsFeasible(
+        selected,
+        selectedIds,
+        Number(strategy.joint_training_fraction ?? 0),
+        trainingDatasets,
+        inventories,
+      )
+    ) {
+      errors.push(
+        `${selected.id} cannot simultaneously satisfy its requested focus/joint, solo/group, and dataset source percentages.`,
+      );
     }
   }
 

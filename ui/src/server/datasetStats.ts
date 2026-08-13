@@ -16,6 +16,7 @@ type IdentityAssignments = {
 };
 
 type IdentityMediaCoverage = { sources: number; solo: number; group: number };
+type IdentitySourceGroup = { identityIds: string[]; sources: number };
 export type IdentityCoverage = {
   id: string;
   images: IdentityMediaCoverage;
@@ -36,6 +37,13 @@ export type DatasetInventory = {
     videosVisual: [string, string][];
     videosAudio: [string, string][];
     audio: [string, string][];
+  };
+  identityGroupsByMedia: {
+    images: IdentitySourceGroup[];
+    videos: IdentitySourceGroup[];
+    videosVisual: IdentitySourceGroup[];
+    videosAudio: IdentitySourceGroup[];
+    audio: IdentitySourceGroup[];
   };
   images: MediaInventory;
   videos: MediaInventory;
@@ -291,6 +299,9 @@ export async function collectDatasetInventory(
     jointIdentityPairsByMedia: {
       images: [], videos: [], videosVisual: [], videosAudio: [], audio: [],
     },
+    identityGroupsByMedia: {
+      images: [], videos: [], videosVisual: [], videosAudio: [], audio: [],
+    },
     images: emptyMediaInventory(),
     videos: emptyMediaInventory(),
     audio: emptyMediaInventory(),
@@ -298,6 +309,7 @@ export async function collectDatasetInventory(
   };
   const jointPairKeys = new Set<string>();
   const jointPairKeysByMedia = new Map<keyof DatasetInventory['jointIdentityPairsByMedia'], Set<string>>();
+  const identityGroupIndices = new Map<keyof DatasetInventory['identityGroupsByMedia'], Map<string, number>>();
 
   for (const sourcePath of sourceFiles) {
     const extension = path.extname(sourcePath).toLowerCase();
@@ -347,6 +359,23 @@ export async function collectDatasetInventory(
         }
       }
     };
+    const addIdentityGroup = (
+      matching: IdentityAssignments[],
+      media: keyof DatasetInventory['identityGroupsByMedia'],
+    ) => {
+      if (!matching.length) return;
+      const identityIds = matching.map(assignment => assignment.id).sort();
+      const key = identityIds.join('\0');
+      const indices = identityGroupIndices.get(media) ?? new Map<string, number>();
+      identityGroupIndices.set(media, indices);
+      const existingIndex = indices.get(key);
+      if (existingIndex == null) {
+        indices.set(key, inventory.identityGroupsByMedia[media].length);
+        inventory.identityGroupsByMedia[media].push({ identityIds, sources: 1 });
+      } else {
+        inventory.identityGroupsByMedia[media][existingIndex].sources += 1;
+      }
+    };
     const updateCoverage = (matching: IdentityAssignments[], field: keyof Omit<IdentityCoverage, 'id'>) => {
       for (const assignment of matching) {
         const coverage = inventory.identities.find(identity => identity.id === assignment.id)?.[field];
@@ -357,9 +386,13 @@ export async function collectDatasetInventory(
       }
     };
     if (IMAGE_EXTENSIONS.has(extension)) {
+      addIdentityGroup(imageIdentities, 'images');
       addJointPairs(imageIdentities, 'images');
       updateCoverage(imageIdentities, 'images');
     } else if (VIDEO_EXTENSIONS.has(extension)) {
+      addIdentityGroup(videoIdentities, 'videos');
+      addIdentityGroup(videoVisualIdentities, 'videosVisual');
+      addIdentityGroup(audioIdentities, 'videosAudio');
       addJointPairs(videoIdentities, 'videos');
       addJointPairs(videoVisualIdentities, 'videosVisual');
       addJointPairs(audioIdentities, 'videosAudio');
@@ -367,6 +400,7 @@ export async function collectDatasetInventory(
       updateCoverage(videoVisualIdentities, 'videosVisual');
       updateCoverage(audioIdentities, 'videosAudio');
     } else if (AUDIO_EXTENSIONS.has(extension)) {
+      addIdentityGroup(audioIdentities, 'audio');
       addJointPairs(audioIdentities, 'audio');
       updateCoverage(audioIdentities, 'audio');
     }
@@ -429,6 +463,18 @@ export async function collectDatasetInventories(
         identityCount: 0,
         identities: [],
         jointIdentityPairs: [],
+        jointIdentityPairsByMedia: {
+          image: [],
+          videoVisual: [],
+          videoAudiovisual: [],
+          audio: [],
+        },
+        identityGroupsByMedia: {
+          image: [],
+          videoVisual: [],
+          videoAudiovisual: [],
+          audio: [],
+        },
         images: emptyMediaInventory(),
         videos: emptyMediaInventory(),
         audio: emptyMediaInventory(),

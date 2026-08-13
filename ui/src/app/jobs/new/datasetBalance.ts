@@ -1,3 +1,5 @@
+import { calculateCharacterIdentitySourceShares } from './characterSourceShares.mjs';
+
 export type DatasetMediaInventory = {
   sources: number;
   assignedSources: number;
@@ -9,6 +11,13 @@ export type DatasetInventory = {
   identityCount: number;
   identities?: import('./characterTrainingBalance').CharacterIdentityCoverage[];
   jointIdentityPairs?: [string, string][];
+  identityGroupsByMedia?: {
+    images: Array<{ identityIds: string[]; sources: number }>;
+    videos: Array<{ identityIds: string[]; sources: number }>;
+    videosVisual: Array<{ identityIds: string[]; sources: number }>;
+    videosAudio: Array<{ identityIds: string[]; sources: number }>;
+    audio: Array<{ identityIds: string[]; sources: number }>;
+  };
   images: DatasetMediaInventory;
   videos: DatasetMediaInventory;
   audio: DatasetMediaInventory;
@@ -35,7 +44,13 @@ export type DatasetBalanceOptions = {
   characterDop: boolean;
   globalTrigger: boolean;
   characterTraining?: {
-    identities: Array<{ id: string; weight: number; source_weights?: Record<string, number> }>;
+    identities: Array<{
+      id: string;
+      weight: number;
+      solo_fraction?: number;
+      context_fractions?: Partial<Record<'image' | 'video' | 'audio', number>>;
+      source_weights?: Record<string, number>;
+    }>;
     joint_training_fraction: number;
   };
 };
@@ -110,6 +125,26 @@ const identityCoverageForConfig = (
   return [identity.images];
 };
 
+const identityGroupsForConfig = (dataset: DatasetBalanceConfig, inventory: DatasetInventory | undefined) => {
+  const groups = inventory?.identityGroupsByMedia;
+  if (!groups) return [];
+  const isAudioOnly = Boolean(dataset.do_audio) && dataset.resolution.length === 0;
+  if (isAudioOnly) return [...groups.audio, ...groups.videosAudio];
+  const isVideo = dataset.num_frames > 1 || Boolean(dataset.auto_frame_count);
+  if (isVideo) return [...groups.images, ...(dataset.do_audio ? groups.videos : groups.videosVisual)];
+  return groups.images;
+};
+
+const jointSourceCount = (
+  dataset: DatasetBalanceConfig,
+  inventory: DatasetInventory | undefined,
+  identityId: string,
+  selectedIds: Set<string>,
+) => identityGroupsForConfig(dataset, inventory).reduce((total, group) => {
+  const selectedOnSource = group.identityIds.filter(id => selectedIds.has(id));
+  return total + (selectedOnSource.length > 1 && selectedOnSource.includes(identityId) ? group.sources : 0);
+}, 0);
+
 const selectedIdentityViewCount = (
   dataset: DatasetBalanceConfig,
   inventory: DatasetInventory | undefined,
@@ -123,7 +158,7 @@ const selectedIdentityViewCount = (
     const coverage = identityCoverageForConfig(dataset, identity);
     const focusViews = coverage.reduce((sum, media) => sum + media.sources, 0);
     const jointViews = Number(options.characterTraining?.joint_training_fraction ?? 0) > 0
-      ? coverage.reduce((sum, media) => sum + media.group, 0)
+      ? jointSourceCount(dataset, inventory, identity.id, selectedIds)
       : 0;
     return total + focusViews + jointViews;
   }, 0);
@@ -202,39 +237,25 @@ export function calculateDatasetBalance(
   const hasBothPools = trainingItems > 0 && regularizationItems > 0;
   const curriculumShares = new Map<number, number>();
   if (options.characterTraining) {
+    const selectedIds = new Set(options.characterTraining.identities.map(identity => identity.id));
     const totalIdentityWeight = options.characterTraining.identities.reduce(
       (sum, identity) => sum + Number(identity.weight), 0,
     );
     for (const identity of options.characterTraining.identities) {
       const identityShare = totalIdentityWeight > 0 ? Number(identity.weight) / totalIdentityWeight : 0;
-      const eligible = rows.map((row, index) => {
-        const dataset = datasets[index];
-        const inventory = findInventory(dataset.folder_path, statsByPath);
-        const coverage = inventory?.identities?.find(item => item.id === identity.id);
-        const count = coverage && !dataset.is_reg && dataset.character_dop_use_dataset_annotations !== false
-          ? identityCoverageForConfig(dataset, coverage).reduce((sum, media) => sum + media.sources, 0)
-          : 0;
-        return { index, path: dataset.folder_path, count };
-      }).filter(source => source.count > 0);
-      const explicit = new Map(
-        Object.entries(identity.source_weights ?? {})
-          .filter(([sourcePath]) => sourcePath !== '*')
-          .map(([sourcePath, weight]) => [normalizedPath(sourcePath), Number(weight)]),
+      const sourceShares = calculateCharacterIdentitySourceShares(
+        identity,
+        selectedIds,
+        Number(options.characterTraining.joint_training_fraction ?? 0),
+        datasets,
+        statsByPath,
       );
-      const explicitTotal = [...explicit.values()].reduce((sum, weight) => sum + weight, 0);
-      const remainder = identity.source_weights?.['*'] ?? Math.max(0, 1 - explicitTotal);
-      const automaticCount = eligible.reduce(
-        (sum, source) => sum + (explicit.has(normalizedPath(source.path)) ? 0 : source.count), 0,
-      );
-      const allCount = eligible.reduce((sum, source) => sum + source.count, 0);
-      for (const source of eligible) {
-        const sourceShare = identity.source_weights
-          ? explicit.get(normalizedPath(source.path))
-            ?? (automaticCount > 0 ? remainder * source.count / automaticCount : 0)
-          : allCount > 0 ? source.count / allCount : 0;
+      for (const [sourcePath, sourceShare] of sourceShares) {
+        const sourceIndex = datasets.findIndex(dataset => normalizedPath(dataset.folder_path) === normalizedPath(sourcePath));
+        if (sourceIndex < 0) continue;
         curriculumShares.set(
-          source.index,
-          (curriculumShares.get(source.index) ?? 0) + identityShare * sourceShare,
+          sourceIndex,
+          (curriculumShares.get(sourceIndex) ?? 0) + identityShare * sourceShare,
         );
       }
     }

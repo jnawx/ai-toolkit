@@ -579,7 +579,12 @@ export default function CharacterDOPAnnotator({ open, datasetName, mediaPath, on
         setState(activeState);
         setPrompts(activeState.prompts);
       } else {
-        await loadState(activeIdentityId);
+        const refreshedState: AnnotationState = await request('state', {
+          identityId: activeIdentityId,
+        });
+        setState(refreshedState);
+        setPrompts(refreshedState.prompts);
+        setIntervals(refreshedState.audio.intervals);
       }
       setDetection(null);
       setSelectedCandidateIds([]);

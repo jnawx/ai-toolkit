@@ -54,6 +54,9 @@ def expand_character_identity_file_items(file_items):
     expanded = []
     for file_item in file_items:
         identity_views = getattr(file_item, "character_dop_identity_views", [])
+        if file_item.is_reg:
+            expanded.append(file_item)
+            continue
         strategy = getattr(file_item.dataset_config, "character_training", None)
         if strategy and not file_item.is_reg:
             selected_ids = [

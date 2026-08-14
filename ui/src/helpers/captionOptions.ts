@@ -1,7 +1,7 @@
 import { GroupedSelectOption, SelectOption } from "@/types";
 
-type CaptionGroup = 'image' | 'music' | 'video';
-type AdditionalSections = 'caption.model_name_or_path2' | 'caption.caption_prompt' | 'caption.max_res' | 'caption.max_new_tokens' | 'caption.fixed_caption' | 'caption.thinking' | 'caption.batch_size';
+type CaptionGroup = 'image' | 'music' | 'video' | 'image/video/sound';
+type AdditionalSections = 'caption.model_name_or_path2' | 'caption.caption_prompt' | 'caption.max_res' | 'caption.max_new_tokens' | 'caption.fixed_caption' | 'caption.thinking' | 'caption.batch_size' | 'caption.layer_offloading';
 
 export interface CaptionOption {
     name: string;
@@ -50,6 +50,22 @@ overall_soundscape: 1-4 sentences in one paragraph summarizing the ambient sound
 non_diegetic_music: 1-3 sentences describing background music the characters cannot hear: instrumentation, tempo, rhythm, and dynamic changes, with no abstract mood words. Music coming from a source inside the scene belongs in the multimodal description instead. Use N/A if there is none.
 
 Describe only what is actually seen and heard. Be decisive. No preamble and no extra text - output only the three fields.`;
+
+// The T2VA format applied to a still image: one static [Shot 1], no timeline,
+// no audio fields beyond the required N/A placeholders.
+const minimaxImageCaptionPrompt = `Caption this image as a MiniMax training prompt for a single still frame. Output exactly three fields in this order, each starting on its own line with these exact field names:
+
+integrated_multimodal_description: [Shot 1] ...
+
+overall_soundscape: N/A
+
+non_diegetic_music: N/A
+
+Rules for integrated_multimodal_description: Write a single [Shot 1] with no timestamp, no cuts, and no camera motion - the camera holds a static shot on a still frame. State the overall visual style first (Live-action, cinematic, 2D-animated, 3D CG, claymation, watercolor, or vintage film) and the framing (extreme wide shot, wide shot, medium shot, medium close-up, close-up, or extreme close-up, plus the viewpoint). Then describe everything visible decisively and specifically: subject appearance, pose, and position; clothing, colors, and materials; the scene, lighting, and key props; and the spatial relationships between them. There is no motion, no dialogue, and no sound - do not invent any. Put any legible text in the image (signs, labels, packaging) in double quotation marks verbatim without translating it.
+
+overall_soundscape and non_diegetic_music are always exactly N/A for a still image.
+
+Describe only what is actually visible. Be decisive. No preamble and no extra text - output only the three fields.`;
 
 // Editable ADDITIONAL INSTRUCTIONS block injected into the Ideogram system prompt.
 // Users can tweak this for dataset-specific guidance without altering the fixed
@@ -108,10 +124,10 @@ export const captionerTypes: CaptionOption[] = [
     {
         name: 'Qwen3OmniCaptioner',
         label: 'Qwen3-Omni',
-        group: 'video',
+        group: 'image/video/sound',
         defaults: {
-            'config.process[0].caption.model_name_or_path': ['ostris/Qwen3-Omni-30B-A3B-Instruct', defaultNameOrPath],
-            'config.process[0].caption.extensions': [extensionsVideo, defaultExtensions],
+            'config.process[0].caption.model_name_or_path': ['ai-toolkit/Qwen3-Omni-30B-A3B-Thinking', defaultNameOrPath],
+            'config.process[0].caption.extensions': [[...extensionsVideo, ...extensionsImage], defaultExtensions],
             'config.process[0].caption.caption_prompt': [defaultVideoCaptionPrompt, undefined],
             'config.process[0].caption.max_res': [512, undefined],
             'config.process[0].caption.max_new_tokens': [512, undefined],
@@ -119,17 +135,22 @@ export const captionerTypes: CaptionOption[] = [
             'config.process[0].caption.compile': [true, false],
         },
         name_or_path_options: [
-            { value: 'ostris/Qwen3-Omni-30B-A3B-Instruct', label: 'ostris/Qwen3-Omni-30B-A3B-Instruct' },
+            { value: 'ai-toolkit/Qwen3-Omni-30B-A3B-Instruct', label: 'ai-toolkit/Qwen3-Omni-30B-A3B-Instruct' },
+            { value: 'ai-toolkit/Qwen3-Omni-30B-A3B-Thinking', label: 'ai-toolkit/Qwen3-Omni-30B-A3B-Thinking' },
+            { value: 'ai-toolkit/Huihui-Qwen3-Omni-30B-A3B-Thinking-abliterated', label: 'ai-toolkit/Huihui-Qwen3-Omni-30B-A3B-Thinking-abliterated' },
         ],
         captionPrompts: {
             'General': defaultVideoCaptionPrompt,
             'MiniMax H4 T2V': minimaxT2VCaptionPrompt,
+            'MiniMax H4 Image': minimaxImageCaptionPrompt,
         },
         additionalSections: [
             'caption.caption_prompt',
             'caption.max_res',
             'caption.max_new_tokens',
             'caption.batch_size',
+            'caption.layer_offloading',
+            'caption.thinking',
         ],
     },
     {
@@ -179,8 +200,8 @@ export const groupedCaptionerTypes: GroupedSelectOption[] = captionerTypes.reduc
 
 export const quantizationOptions: SelectOption[] = [
     { value: '', label: '- NONE -' },
-    { value: 'float8', label: 'float8 (default)' },
-    { value: 'convrot8', label: '8bit convrot' },
+    { value: 'float8', label: 'float8' },
+    { value: 'convrot8', label: '8bit convrot (default)' },
     { value: 'convrot4', label: '4bit convrot (nvfp4)' },
     { value: 'convrotint7', label: '7bit convrot' },
     { value: 'convrotint6', label: '6bit convrot' },

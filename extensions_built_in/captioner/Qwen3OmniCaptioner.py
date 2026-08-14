@@ -1,4 +1,4 @@
-from transformers import AutoConfig, AutoProcessor
+from transformers import AutoConfig, AutoProcessor, StoppingCriteria
 from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
     Qwen3OmniMoeThinkerForConditionalGeneration,
 )
@@ -27,17 +27,68 @@ logging.disable(logging.WARNING)
 # frame sampling rate for video captioning
 VIDEO_FPS = 2
 
+# still-image files caption through the image pipeline (no audio, no frames)
+IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "webp"}
+
 # fixed generation ceiling under compiled decode: a constant max_length keeps
 # the static kv cache (and so the compiled decode graph) at one shape for
 # every video; the real per-caption budget is enforced by a stopping criterion
 STATIC_MAX_LENGTH = 8192
 
-# single-file comfy-format checkpoint (thinker only, convrot8 int8) produced by
-# scripts/convert_vllm_to_comfy.py. This is always what we load — never the
-# original bf16 shards.
-CONVROT_FILENAME = "qwen3_omni_30b_a3b_instruct_thinker_convrot8.safetensors"
-# config + processor (tokenizer, feature extractors) come from the original repo
-BASE_REPO = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+# reasoning cap for thinking models: the visible caption gets the full
+# max_new_tokens budget only after </think> closes
+MAX_THINKING_TOKENS = 4096
+
+# single-file comfy-format checkpoints (thinker only, convrot8 int8) produced
+# by scripts/convert_vllm_to_comfy.py. This is always what we load — never the
+# original bf16 shards. base_repo supplies config + processor (tokenizer,
+# feature extractors, chat template — thinking models need the thinking
+# template, which the finetune repos don't always ship).
+CONVROT_MODELS = {
+    "ai-toolkit/Qwen3-Omni-30B-A3B-Instruct": {
+        "filename": "qwen3_omni_30b_a3b_instruct_thinker_convrot8.safetensors",
+        "base_repo": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        "thinking": False,
+    },
+    "ai-toolkit/Qwen3-Omni-30B-A3B-Thinking": {
+        "filename": "qwen3_omni_30b_a3b_thinking_convrot8.safetensors",
+        "base_repo": "Qwen/Qwen3-Omni-30B-A3B-Thinking",
+        "thinking": True,
+    },
+    "ai-toolkit/Huihui-Qwen3-Omni-30B-A3B-Thinking-abliterated": {
+        "filename": "huihui_qwen3_omni_30b_a3b_thinking_abliterated_convrot8.safetensors",
+        "base_repo": "Qwen/Qwen3-Omni-30B-A3B-Thinking",
+        "thinking": True,
+    },
+}
+DEFAULT_CONVROT_MODEL = "ai-toolkit/Qwen3-Omni-30B-A3B-Instruct"
+
+
+class BatchThinkingBudgetCriteria(StoppingCriteria):
+    """Per-row thinking budget: let each sequence reason freely, then count
+    max_new_tokens from the token after its </think> so the visible caption
+    gets the full budget regardless of how long the reasoning ran. Rows that
+    never close their think block are bounded by the accompanying
+    MaxLengthCriteria / max_new_tokens ceiling."""
+
+    def __init__(self, think_end_token_id: int, max_new_tokens: int):
+        self.think_end_token_id = think_end_token_id
+        self.max_new_tokens = max_new_tokens
+        self.answer_start = None
+
+    def __call__(self, input_ids, scores, **kwargs):
+        batch, length = input_ids.shape
+        if self.answer_start is None:
+            self.answer_start = torch.full(
+                (batch,), -1, dtype=torch.long, device=input_ids.device
+            )
+        newly_closed = (input_ids[:, -1] == self.think_end_token_id) & (
+            self.answer_start < 0
+        )
+        self.answer_start[newly_closed] = length
+        return (self.answer_start >= 0) & (
+            length - self.answer_start >= self.max_new_tokens
+        )
 
 
 class OstrisQwen3OmniThinker(Qwen3OmniMoeThinkerForConditionalGeneration):
@@ -204,21 +255,59 @@ class ConvRot8Experts(torch.nn.Module):
             persistent=False,
         )
 
+    # device the streamed experts should land on when the banks themselves
+    # stay in system RAM (low-vram layer offloading); None = banks resident
+    offload_device = None
+
+    def enable_offload(self, device):
+        """Keep the int8 banks in (pinned) system RAM; forward streams only
+        the routed experts' rows to the GPU per layer call."""
+        self.offload_device = device
+        try:
+            self.gate_up_q = self.gate_up_q.pin_memory()
+            self.down_q = self.down_q.pin_memory()
+            self.gate_up_s = self.gate_up_s.pin_memory()
+            self.down_s = self.down_s.pin_memory()
+        except RuntimeError:
+            pass  # pinning is a speed optimization only; pageable still works
+        # the hadamard matrices are tiny — keep them resident
+        self.gate_up_h = self.gate_up_h.to(device)
+        self.down_h = self.down_h.to(device)
+
     @staticmethod
     def _rotate(w, h, rot):
         shape = w.shape
         return (w.reshape(-1, shape[-1] // rot, rot) @ h).reshape(shape)
 
+    def _gather(self, qdata, scales_u8, hit):
+        """Expert rows + scales for the hit indices, on the compute device."""
+        if self.offload_device is not None and qdata.device.type == "cpu":
+            # each expert's rows are a contiguous view of the pinned bank, so
+            # slice-copies DMA straight to the GPU with zero CPU-side gather
+            # work (a CPU index_select here memcpy'd ~2GB/token on all cores)
+            hit_list = hit.tolist() if torch.is_tensor(hit) else list(hit)
+            scales = scales_u8.view(torch.float32)
+            q = torch.stack(
+                [qdata[i].to(self.offload_device, non_blocking=True) for i in hit_list]
+            )
+            s = torch.stack(
+                [scales[i].to(self.offload_device, non_blocking=True) for i in hit_list]
+            )
+            return q, s
+        return qdata[hit], scales_u8.view(torch.float32)[hit]
+
     def _dequant(self, qdata, scales_u8, h, rot, i):
         # scales are [E, out, 1]; rotation is self-inverse along the in dim
-        scales = scales_u8.view(torch.float32)
-        w = qdata[i].float() * scales[i]
+        q, s = self._gather(
+            qdata, scales_u8, i.reshape(1) if torch.is_tensor(i) else torch.tensor([i])
+        )
+        w = q[0].float() * s[0]
         return self._rotate(w, h, rot).to(self.out_dtype)
 
     def _dequant_batch(self, qdata, scales_u8, h, rot, hit, dtype):
         """Dequantize the hit experts in one shot: [n_hit, out, in]."""
-        scales = scales_u8.view(torch.float32)
-        w = qdata[hit].float() * scales[hit]
+        q, s = self._gather(qdata, scales_u8, hit)
+        w = q.float() * s
         return self._rotate(w, h, rot).to(dtype)
 
     def forward(self, hidden_states, top_k_index, top_k_weights):
@@ -255,7 +344,12 @@ class ConvRot8Experts(torch.nn.Module):
             del w_gate_up
             h = F.silu(gate) * up
             w_down = self._dequant_batch(
-                self.down_q, self.down_s, self.down_h, self.down_rot, flat, hidden_states.dtype
+                self.down_q,
+                self.down_s,
+                self.down_h,
+                self.down_rot,
+                flat,
+                hidden_states.dtype,
             )
             out = torch.bmm(h, w_down.transpose(1, 2)).squeeze(1)
             del w_down
@@ -318,11 +412,17 @@ class ConvRot8Experts(torch.nn.Module):
             top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
             current_state = hidden_states[token_idx]
             w_gate_up = self._dequant(
-                self.gate_up_q, self.gate_up_s, self.gate_up_h, self.gate_up_rot, expert_idx
+                self.gate_up_q,
+                self.gate_up_s,
+                self.gate_up_h,
+                self.gate_up_rot,
+                expert_idx,
             )
             gate, up = F.linear(current_state, w_gate_up).chunk(2, dim=-1)
             current_hidden_states = F.silu(gate) * up
-            w_down = self._dequant(self.down_q, self.down_s, self.down_h, self.down_rot, expert_idx)
+            w_down = self._dequant(
+                self.down_q, self.down_s, self.down_h, self.down_rot, expert_idx
+            )
             current_hidden_states = F.linear(current_hidden_states, w_down)
             current_hidden_states = (
                 current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
@@ -393,40 +493,56 @@ class Qwen3OmniCaptioner(BaseCaptioner):
         MODELS_PATH/text_encoders."""
         from toolkit.paths import MODELS_PATH
 
+        def info_for_filename(filename):
+            for info in CONVROT_MODELS.values():
+                if info["filename"] == filename:
+                    return info
+            return CONVROT_MODELS[DEFAULT_CONVROT_MODEL]
+
         name_or_path = self.caption_config.model_name_or_path
         if os.path.isfile(name_or_path):
+            self._model_info = info_for_filename(os.path.basename(name_or_path))
             return name_or_path
+
+        model_info = CONVROT_MODELS.get(
+            name_or_path, CONVROT_MODELS[DEFAULT_CONVROT_MODEL]
+        )
+        filename = model_info["filename"]
+
         if os.path.isdir(name_or_path):
-            candidate = os.path.join(name_or_path, CONVROT_FILENAME)
+            candidate = os.path.join(name_or_path, filename)
             if os.path.exists(candidate):
+                self._model_info = model_info
                 return candidate
             files = [f for f in os.listdir(name_or_path) if f.endswith(".safetensors")]
             if len(files) == 1:
+                self._model_info = info_for_filename(files[0])
                 return os.path.join(name_or_path, files[0])
             raise FileNotFoundError(
-                f"No {CONVROT_FILENAME} (or single .safetensors) in {name_or_path}"
+                f"No {filename} (or single .safetensors) in {name_or_path}"
             )
 
+        self._model_info = model_info
         te_dir = os.path.join(MODELS_PATH, "text_encoders")
         for candidate in (
-            os.path.join(te_dir, CONVROT_FILENAME),
-            os.path.join(MODELS_PATH, CONVROT_FILENAME),
+            os.path.join(te_dir, filename),
+            os.path.join(MODELS_PATH, filename),
         ):
             if os.path.exists(candidate):
                 return candidate
         if os.path.isdir(te_dir):
             for dirpath, dirnames, filenames in os.walk(te_dir):
                 dirnames.sort()
-                if CONVROT_FILENAME in filenames:
-                    return os.path.join(dirpath, CONVROT_FILENAME)
+                if filename in filenames:
+                    return os.path.join(dirpath, filename)
 
         import huggingface_hub
 
         self.print_and_status_update(
-            f"Downloading {CONVROT_FILENAME} from {name_or_path} into {te_dir}"
+            f"Downloading {filename} from {name_or_path} into {te_dir}"
         )
         return huggingface_hub.hf_hub_download(
-            repo_id=name_or_path, filename=CONVROT_FILENAME, local_dir=te_dir
+            repo_id=name_or_path, filename=filename, local_dir=te_dir
         )
 
     def load_model(self):
@@ -434,9 +550,16 @@ class Qwen3OmniCaptioner(BaseCaptioner):
         from safetensors.torch import load_file
 
         ckpt_path = self._resolve_checkpoint()
-        self.print_and_status_update("Loading Qwen3-Omni thinker (convrot8)")
+        base_repo = self._model_info["base_repo"]
+        self.is_thinking_model = self._model_info["thinking"]
+        # thinking models reason by default; the template's enable_thinking=False
+        # (an empty <think></think> block) suppresses it unless the user asked
+        self.thinking_enabled = self.is_thinking_model and self.caption_config.thinking
+        self.print_and_status_update(
+            f"Loading Qwen3-Omni thinker (convrot8, base {base_repo})"
+        )
 
-        config = AutoConfig.from_pretrained(BASE_REPO)
+        config = AutoConfig.from_pretrained(base_repo)
         with init_empty_weights(include_buffers=False):
             model = OstrisQwen3OmniThinker(config.thinker_config)
         model.eval()
@@ -482,6 +605,15 @@ class Qwen3OmniCaptioner(BaseCaptioner):
 
         model.generation_config.pad_token_id = 151643
         model.generation_config.eos_token_id = [151645, 151643]
+        # built from config, so no sampling defaults were loaded; greedy decode
+        # falls into repetition loops on long captions (A-B-A-B forever on
+        # low-motion clips). Qwen's recommended sampling for the Qwen3 family:
+        model.generation_config.do_sample = True
+        # Qwen's recommended sampling: instruct 0.7/0.8, thinking 0.6/0.95
+        model.generation_config.temperature = 0.6 if self.is_thinking_model else 0.7
+        model.generation_config.top_p = 0.95 if self.is_thinking_model else 0.8
+        model.generation_config.top_k = 20
+        model.generation_config.repetition_penalty = 1.05
 
         # swap the slow bf16 Conv3d patch_embed for an equivalent fast linear
         patch_qwen_vl_patch_embed(model)
@@ -493,16 +625,51 @@ class Qwen3OmniCaptioner(BaseCaptioner):
             )
 
         self.model = model
+        if self.caption_config.layer_offloading:
+            from toolkit.memory_management import MemoryManager
+
+            self.print_and_status_update(
+                " - layer offloading enabled: expert banks stay in system RAM, "
+                "linears stream per layer"
+            )
+            # expert banks: stay in system RAM, stream routed experts per call
+            for module in model.modules():
+                if isinstance(module, ConvRot8Experts):
+                    module.enable_offload(self.device_torch)
+            # everything the manager doesn't classify must ride to the GPU as
+            # unmanaged: the output head, the MoE routers (bare-parameter
+            # modules doing F.linear directly), and buffer-only modules
+            ignore = [model.lm_head]
+            ignore += [
+                m
+                for m in model.modules()
+                if m.__class__.__name__ == "SinusoidsPositionEmbedding"
+                or m.__class__.__name__.endswith("TopKRouter")
+            ]
+            MemoryManager.attach(
+                model,
+                self.device_torch,
+                offload_percent=self.caption_config.layer_offloading_percent,
+                ignore_modules=ignore,
+            )
         self.model.to(self.device_torch)
-        self.processor = AutoProcessor.from_pretrained(BASE_REPO)
+        self.processor = AutoProcessor.from_pretrained(self._model_info["base_repo"])
         flush()
 
+    @staticmethod
+    def _is_image_file(file_path: str) -> bool:
+        return os.path.splitext(file_path)[1].lower().lstrip(".") in IMAGE_EXTENSIONS
+
     def _build_messages(self, _file_path: str):
+        if self._is_image_file(_file_path):
+            media = {"type": "image", "image": _file_path}
+        else:
+            media = {"type": "video", "video": _file_path}
         return [
             {
                 "role": "user",
                 "content": [
-                    {"type": "video", "video": _file_path},
+                    media,
                     {"type": "text", "text": self.caption_config.caption_prompt},
                 ],
             }
@@ -518,33 +685,60 @@ class Qwen3OmniCaptioner(BaseCaptioner):
         }
 
     def _prep_media(self, file_path: str):
-        """CPU side of one video, safe to run in a worker thread: decode +
-        subsample frames, extract the audio track, render the chat text. At
-        batch size 1 the full processor (tokenize, resize, mel) runs here too,
-        so the main thread only moves tensors and generates."""
-        from transformers.video_utils import load_video
-        from transformers.audio_utils import load_audio
+        """CPU side of one file, safe to run in a worker thread: decode +
+        subsample frames (or load the image), extract the audio track, render
+        the chat text. At batch size 1 the full processor (tokenize, resize,
+        mel) runs here too, so the main thread only moves tensors and
+        generates."""
+        if self._is_image_file(file_path):
+            from PIL import Image
 
-        frames = load_video(file_path, fps=VIDEO_FPS)
-        if isinstance(frames, tuple):
-            frames = frames[0]
-        audio = None
-        try:
-            a = load_audio(file_path, sampling_rate=16000)
-            if a is not None and a.size > 0:
-                audio = a
-        except Exception:
-            pass
-        text = self.processor.apply_chat_template(
-            self._build_messages(file_path), tokenize=False, add_generation_prompt=True
+            image = Image.open(file_path).convert("RGB")
+            item = {"file": file_path, "kind": "image", "image": image, "audio": None}
+        else:
+            from transformers.video_utils import load_video
+            from transformers.audio_utils import load_audio
+
+            frames = load_video(file_path, fps=VIDEO_FPS)
+            if isinstance(frames, tuple):
+                frames = frames[0]
+            audio = None
+            try:
+                a = load_audio(file_path, sampling_rate=16000)
+                if a is not None and a.size > 0:
+                    audio = a
+            except Exception:
+                pass
+            item = {
+                "file": file_path,
+                "kind": "video_audio" if audio is not None else "video_silent",
+                "frames": frames,
+                "audio": audio,
+            }
+        template_kwargs = {}
+        if self.is_thinking_model and not self.thinking_enabled:
+            template_kwargs["enable_thinking"] = False
+        item["text"] = self.processor.apply_chat_template(
+            self._build_messages(file_path),
+            tokenize=False,
+            add_generation_prompt=True,
+            **template_kwargs,
         )
-        item = {"file": file_path, "frames": frames, "audio": audio, "text": text}
         if self.caption_config.batch_size <= 1:
             item["inputs"] = self._process_items([item])
         return item
 
     def _process_items(self, items):
-        use_audio = items[0]["audio"] is not None
+        kind = items[0]["kind"]
+        if kind == "image":
+            return self.processor(
+                text=[it["text"] for it in items],
+                images=[it["image"] for it in items],
+                return_tensors="pt",
+                padding=True,
+                size=self._size_kwargs(),
+            )
+        use_audio = kind == "video_audio"
         return self.processor(
             text=[it["text"] for it in items],
             audio=[it["audio"] for it in items] if use_audio else None,
@@ -558,9 +752,9 @@ class Qwen3OmniCaptioner(BaseCaptioner):
         )
 
     def _caption_batch(self, items):
-        """Batched generate over preprocessed items (all with audio, or all
-        silent). Returns captions in item order."""
-        use_audio = items[0]["audio"] is not None
+        """Batched generate over preprocessed items (all the same kind: image,
+        video with audio, or silent video). Returns captions in item order."""
+        use_audio = items[0]["kind"] == "video_audio"
         if len(items) == 1 and "inputs" in items[0]:
             inputs = items[0]["inputs"]
         else:
@@ -569,29 +763,46 @@ class Qwen3OmniCaptioner(BaseCaptioner):
         # under static cache, generate hands the forward a prepared 4D mask;
         # the true 2D padding mask is needed for the prefill rope index
         self.model._pad_mask_2d = inputs.get("attention_mask", None)
-        gen_kwargs = {}
-        if self.model.generation_config.cache_implementation == "static":
-            # constant max_length -> constant cache shape -> no recompiles;
-            # the actual budget comes from the stopping criterion
-            from transformers.generation import MaxLengthCriteria, StoppingCriteriaList
-
-            input_len = inputs["input_ids"].shape[1]
-            gen_kwargs["max_length"] = STATIC_MAX_LENGTH
-            gen_kwargs["stopping_criteria"] = StoppingCriteriaList(
-                [MaxLengthCriteria(max_length=input_len + self.caption_config.max_new_tokens)]
-            )
-        else:
-            gen_kwargs["max_new_tokens"] = self.caption_config.max_new_tokens
         generated_ids = self.model.generate(
             **inputs,
             use_audio_in_video=use_audio,
-            **gen_kwargs,
+            **self._gen_kwargs(inputs["input_ids"].shape[1]),
         )
         trimmed = generated_ids[:, inputs["input_ids"].shape[1] :]
         captions = self.processor.batch_decode(
             trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )
+        # thinking models emit reasoning first; keep only what follows it
+        captions = [c.split("</think>")[-1] if "</think>" in c else c for c in captions]
         return [c.strip() for c in captions]
+
+    def _gen_kwargs(self, input_len: int) -> dict:
+        """Generation length controls. Thinking models get their reasoning
+        budget on top: max_new_tokens starts counting after </think> closes.
+        Under compiled decode, max_length stays constant (fixed cache shape)
+        and the real budget lives in the stopping criteria."""
+        from transformers.generation import MaxLengthCriteria, StoppingCriteriaList
+
+        max_new = self.caption_config.max_new_tokens
+        compiled = self.model.generation_config.cache_implementation == "static"
+        criteria = []
+        if self.thinking_enabled:
+            think_end_id = self.processor.tokenizer.convert_tokens_to_ids("</think>")
+            if think_end_id is not None:
+                criteria.append(BatchThinkingBudgetCriteria(think_end_id, max_new))
+            budget = MAX_THINKING_TOKENS + max_new
+        else:
+            budget = max_new
+        if compiled:
+            criteria.append(MaxLengthCriteria(max_length=input_len + budget))
+            return {
+                "max_length": STATIC_MAX_LENGTH,
+                "stopping_criteria": StoppingCriteriaList(criteria),
+            }
+        kwargs = {"max_new_tokens": budget}
+        if criteria:
+            kwargs["stopping_criteria"] = StoppingCriteriaList(criteria)
+        return kwargs
 
     def run_caption_loop(self):
         """Batched pipeline: CPU worker threads decode/preprocess videos ahead
@@ -657,7 +868,8 @@ class Qwen3OmniCaptioner(BaseCaptioner):
                     break
                 futures.append((path, executor.submit(self._prep_media, path)))
 
-            with_audio, silent = [], []
+            # batches must be homogeneous: the processor call differs per kind
+            buckets = {"image": [], "video_audio": [], "video_silent": []}
             while futures:
                 if self.is_ui_captioner:
                     self.maybe_stop()
@@ -673,12 +885,12 @@ class Qwen3OmniCaptioner(BaseCaptioner):
                     print(f"Error preprocessing {path}: {e}")
                     finish(path, None)
                     continue
-                bucket = with_audio if item["audio"] is not None else silent
+                bucket = buckets[item["kind"]]
                 bucket.append(item)
                 if len(bucket) >= batch_size:
                     flush(bucket)
-            flush(with_audio)
-            flush(silent)
+            for bucket in buckets.values():
+                flush(bucket)
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
             pbar.close()
@@ -689,6 +901,11 @@ class Qwen3OmniCaptioner(BaseCaptioner):
         the per-kernel python/launch gaps that cap GPU utilization at small
         batch sizes. First video per batch shape is slow (compile warmup)."""
         if not self.caption_config.compile:
+            return
+        if self.caption_config.layer_offloading:
+            # cuda graphs need every tensor GPU-resident; offloaded weights
+            # live in system RAM, so the compiled decode path cannot capture
+            print("[AITK] layer offloading is on; skipping compiled decode.")
             return
         import importlib.util
 
@@ -709,77 +926,10 @@ class Qwen3OmniCaptioner(BaseCaptioner):
         )
 
     def get_caption_for_file(self, file_path: str) -> str:
+        # single-file path (and the per-file fallback when a batch fails):
+        # same prep + generate flow as the batched loop, for one item
         try:
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "video",
-                            "video": file_path,
-                        },
-                        {"type": "text", "text": self.caption_config.caption_prompt},
-                    ],
-                }
-            ]
-
-            max_pixels = self.caption_config.max_res * self.caption_config.max_res
-            # render the chat text only; the media goes to the processor
-            # directly so the audio track is interleaved INTO the video block
-            # (use_audio_in_video) instead of forming a separate audio segment
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-
-            # pull the audio track out of the video file; silent videos fall
-            # back to frames only
-            from transformers.audio_utils import load_audio
-
-            use_audio = True
-            try:
-                audio = load_audio(file_path, sampling_rate=16000)
-                if audio.size == 0:
-                    use_audio = False
-            except Exception as audio_err:
-                print(
-                    f"No audio track for {file_path} ({audio_err}); captioning frames only"
-                )
-                use_audio = False
-
-            inputs = self.processor(
-                text=text,
-                audio=[audio] if use_audio else None,
-                videos=[file_path],
-                return_tensors="pt",
-                padding=True,
-                use_audio_in_video=use_audio,
-                fps=VIDEO_FPS,
-                do_sample_frames=True,
-                # shortest_edge/longest_edge are total pixel counts
-                # (min_pixels/max_pixels), not edge lengths
-                size={
-                    "shortest_edge": min(131072, max_pixels),
-                    "longest_edge": max_pixels,
-                },
-            )
-            inputs = inputs.to(self.device_torch).to(self.torch_dtype)
-
-            generated_ids = self.model.generate(
-                **inputs,
-                use_audio_in_video=use_audio,
-                max_new_tokens=self.caption_config.max_new_tokens,
-            )
-            generated_ids_trimmed = [
-                out_ids[len(in_ids) :]
-                for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
-            output_text = self.processor.batch_decode(
-                generated_ids_trimmed,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-            )
-
-            return output_text[0].strip()
+            return self._caption_batch([self._prep_media(file_path)])[0]
         except Exception as e:
             print(f"Error processing {file_path}: {e}")
             traceback.print_exc()

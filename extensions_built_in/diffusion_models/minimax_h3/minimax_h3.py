@@ -1092,7 +1092,9 @@ class MinimaxH3Model(BaseModel):
                 and batch.dataset_config.do_i2v
                 and getattr(batch, "num_frames", 1) > 1
             )
-            cond_rows = None
+            cond_rows, keyframe_anchors, image_ref_shapes = self._build_condition(
+                batch, (t_lat, h_lat, w_lat), device, dtype
+            )
             if do_i2v:
                 if batch.first_frame_latents is not None:
                     first_latents = batch.first_frame_latents.to(device, torch.float32)
